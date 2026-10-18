@@ -1,0 +1,81 @@
+name: Build Fyne App
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  UPLOAD_DIR: upload
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: faceit-tester-linux-amd64.tar.xz
+          - os: windows-latest
+            artifact: faceit-tester-windows-amd64.exe
+          - os: macos-latest
+            artifact: faceit-tester-macos.app
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgl1-mesa-dev \
+            xorg-dev
+
+      - name: Vet and Test (All)
+        shell: bash
+        run: |
+          go vet ./...
+          go test -short ./...
+
+      - name: Install Fyne CLI
+        shell: bash
+        run: go install fyne.io/fyne/v2/cmd/fyne@v2.8.2
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          fyne package -os linux -release
+          mkdir -p "${{ env.UPLOAD_DIR }}"
+          mv faceit-tester*.tar.xz "${{ env.UPLOAD_DIR }}/${{ matrix.artifact }}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          fyne package -os windows -release
+          mkdir -p "${{ env.UPLOAD_DIR }}"
+          mv faceit-tester.exe "${{ env.UPLOAD_DIR }}/${{ matrix.artifact }}"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          fyne package -os darwin -release
+          mkdir -p "${{ env.UPLOAD_DIR }}"
+          mv faceit-tester.app "${{ env.UPLOAD_DIR }}/${{ matrix.artifact }}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ env.UPLOAD_DIR }}
