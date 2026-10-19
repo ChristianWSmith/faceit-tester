@@ -58,8 +58,8 @@ func TestAggregateCities(t *testing.T) {
 
 func TestStateFromDisabledDefaultsAllChecked(t *testing.T) {
 	state := stateFromDisabled(embeddedServers, nil)
-	if len(state) != 74 {
-		t.Fatalf("state has %d entries, want 74", len(state))
+	if len(state) != 66 {
+		t.Fatalf("state has %d entries, want 66", len(state))
 	}
 	for id, checked := range state {
 		if !checked {
@@ -75,13 +75,13 @@ func TestStateFromDisabledIgnoresUnknownIDs(t *testing.T) {
 	state := stateFromDisabled(embeddedServers, []string{
 		"Custom.foo",  // from deleted override
 		"Gone.Region", // from an older version
-		"Chicago.PS",  // real ID — must apply
+		"Chicago.Psychz Networks",
 	})
 	if state["Custom.foo"] {
 		t.Error("unknown ID should not appear in state")
 	}
-	if state["Chicago.PS"] {
-		t.Error("Chicago.PS should be disabled")
+	if state["Chicago.Psychz Networks"] {
+		t.Error("Chicago.Psychz Networks should be disabled")
 	}
 	// Everything else stays checked.
 	checked := 0
@@ -90,26 +90,26 @@ func TestStateFromDisabledIgnoresUnknownIDs(t *testing.T) {
 			checked++
 		}
 	}
-	if checked != 73 {
-		t.Errorf("checked = %d, want 73", checked)
+	if checked != 65 {
+		t.Errorf("checked = %d, want 65", checked)
 	}
 }
 
 func TestDisabledFromStatePrunesStaleIDs(t *testing.T) {
 	// Save-side: state map containing a stale key (e.g. carried in memory
 	// across an override reload) must not leak into the persisted list.
-	state := stateFromDisabled(embeddedServers, []string{"Chicago.PS"})
+	state := stateFromDisabled(embeddedServers, []string{"Chicago.Psychz Networks"})
 	state["Custom.foo"] = false // stale, not in embeddedServers
 
 	disabled := disabledFromState(embeddedServers, state)
-	if !reflect.DeepEqual(disabled, []string{"Chicago.PS"}) {
-		t.Errorf("disabled = %v, want [Chicago.PS]", disabled)
+	if !reflect.DeepEqual(disabled, []string{"Chicago.Psychz Networks"}) {
+		t.Errorf("disabled = %v, want [Chicago.Psychz Networks]", disabled)
 	}
 }
 
 func TestDisabledRoundTrip(t *testing.T) {
 	state := stateFromDisabled(embeddedServers, []string{
-		"Chicago.PS", "San Jose.hz", "Singapore.aws",
+		"Chicago.Psychz Networks", "San Jose.Dedicated.com", "Singapore.AWS",
 	})
 	disabled := disabledFromState(embeddedServers, state)
 	restored := stateFromDisabled(embeddedServers, disabled)
@@ -121,10 +121,10 @@ func TestDisabledRoundTrip(t *testing.T) {
 func TestDisabledFromStateOrder(t *testing.T) {
 	// Persisted list follows regionNames order for stability.
 	state := stateFromDisabled(embeddedServers, []string{
-		"Singapore.aws", "Chicago.PS", "France.O",
+		"Singapore.AWS", "Chicago.Psychz Networks", "France.OVH",
 	})
 	disabled := disabledFromState(embeddedServers, state)
-	want := []string{"Chicago.PS", "France.O", "Singapore.aws"}
+	want := []string{"Chicago.Psychz Networks", "France.OVH", "Singapore.AWS"}
 	if !reflect.DeepEqual(disabled, want) {
 		sort.Strings(disabled)
 		sort.Strings(want)
@@ -138,7 +138,7 @@ func TestStateFromDisabledWithOverrideSet(t *testing.T) {
 	// Override active: prefs written against the override only apply to
 	// override IDs; embedded-only IDs from an earlier session are ignored.
 	override := map[string][]Server{
-		"TEST": {{"CityA", "prov1", "10.0.0.1"}, {"CityA", "prov2", "10.0.0.2"}},
+		"TEST": {srv("CityA", "prov1", "10.0.0.1"), srv("CityA", "prov2", "10.0.0.2")},
 	}
 	state := stateFromDisabled(override, []string{
 		"CityA.prov1", // in override — applies

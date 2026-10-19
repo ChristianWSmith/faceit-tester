@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -57,8 +59,10 @@ type ui struct {
 	checksScroll *container.Scroll
 	testBtn      *widget.Button
 	exportBtn    *widget.Button
+	identifyBtn  *widget.Button
 	statusLabel  *widget.Label
 	table        *widget.Table
+	headerRow    *fyne.Container // results column headers; col 0 width tracks content
 
 	servers  map[string][]Server
 	state    map[string]bool   // server ID → checked
@@ -75,9 +79,12 @@ type ui struct {
 	syncing bool
 
 	rows    [][]tableCell
+	tree    *resultsTree    // hierarchical results model backing rows
 	results []ServerOutcome // full outcomes for CSV export
 	running bool
 	cancel  context.CancelFunc
+
+	nameColWidth float32 // current Server column width (0 = unset)
 }
 
 func main() {
@@ -101,9 +108,16 @@ func main() {
 		regionBy: regionBy,
 		state:    stateFromDisabled(servers, prefs.StringList(prefsDisabledKey)),
 		expanded: expandedFromList(servers, prefs.StringList(prefsExpandedKey)),
+		tree:     newResultsTree(),
 	}
 	u.build()
 	w.SetContent(u.content())
+	// Persist selection + expansion once on exit: writing prefs on every
+	// checkbox tap made the UI feel sluggish on slow storage.
+	w.SetCloseIntercept(func() {
+		u.saveAllPrefs()
+		w.Close()
+	})
 	w.ShowAndRun()
 }
 
@@ -131,9 +145,20 @@ func (u *ui) build() {
 			}
 		},
 	)
-	colWidths := []float32{170, 70, 70, 70, 70, 70}
-	for i, w := range colWidths {
-		u.table.SetColumnWidth(i, w)
+	// Same widths the header row uses; col 0 is re-measured by
+	// refreshTableLayout once rows exist.
+	u.table.SetColumnWidth(0, minNameColWidth)
+	for i := 1; i < 6; i++ {
+		u.table.SetColumnWidth(i, metricColWidth)
+	}
+	// Tapping a region/city row toggles its children; leaves are no-ops.
+	// Unselect immediately so no row stays highlighted.
+	u.table.OnSelected = func(id widget.TableCellID) {
+		if u.tree.toggle(id.Row) {
+			u.rows = u.tree.flatten()
+			u.refreshTableLayout()
+		}
+		u.table.UnselectAll()
 	}
 
 	u.testBtn = widget.NewButton("Test", u.onTestTap)
@@ -142,6 +167,8 @@ func (u *ui) build() {
 	u.exportBtn = widget.NewButtonWithIcon("Export CSV", theme.DocumentSaveIcon(), u.onExportTap)
 	u.exportBtn.Disable()
 
+	u.identifyBtn = widget.NewButtonWithIcon("Identify", theme.SearchIcon(), u.onIdentifyTap)
+
 	if !isElevated() {
 		u.testBtn.Disable()
 		u.statusLabel.SetText("Run this application as administrator to test (required on Windows).")
@@ -149,33 +176,87 @@ func (u *ui) build() {
 }
 
 func (u *ui) content() fyne.CanvasObject {
-	colHeaders := []struct {
-		text  string
-		width float32
-	}{
-		{"Server", 170}, {"Avg ms", 70}, {"Min", 70}, {"Max", 70}, {"Jitter", 70}, {"Loss", 70},
-	}
-	headerRow := container.NewHBox()
-	for _, h := range colHeaders {
-		label := widget.NewLabel(h.text)
-		label.TextStyle = fyne.TextStyle{Bold: true}
-		wrapper := container.NewGridWrap(fyne.NewSize(h.width, label.MinSize().Height), label)
-		headerRow.Add(wrapper)
-	}
+	// The table's findX inserts SizeNamePadding between columns, so the
+	// header HBox (which pads between children with theme.Padding =
+	// SizeNamePadding) matches column-for-column. No outer Padded wrapper:
+	// the table body starts at x=0.
+	u.headerRow = container.NewHBox()
+	u.rebuildHeader(minNameColWidth)
 
 	tableArea := container.NewBorder(
-		container.NewPadded(headerRow), nil, nil, nil, u.table,
+		u.headerRow, nil, nil, nil, u.table,
 	)
 
 	// Tree left, results right; draggable divider.
 	split := container.NewHSplit(container.NewPadded(u.checksScroll), tableArea)
 	split.Offset = 0.35
 
-	// Export + Test buttons pinned left, status fills the rest along the bottom.
-	bottom := container.NewBorder(nil, nil,
-		container.NewHBox(u.exportBtn, u.testBtn), nil, u.statusLabel)
+	// Status fills the left (room for long progress messages); actions
+	// cluster right with the primary Test/Cancel toggle anchored last.
+	bottom := container.NewBorder(nil, nil, nil,
+		container.NewHBox(u.exportBtn, u.identifyBtn, u.testBtn), u.statusLabel)
 
 	return container.NewBorder(nil, bottom, nil, nil, split)
+}
+
+const (
+	// minNameColWidth is the floor for the Server column; it grows to fit
+	// the widest name cell currently rendered (deep tree labels).
+	minNameColWidth = 170
+	// metricColWidth is the fixed width of the five metric columns; sized
+	// for the widest header ("Ping (med)" ≈ 83px padded) with slack for
+	// platform font metrics.
+	metricColWidth = float32(90)
+)
+
+// rebuildHeader recreates the header labels, sizing the Server column to
+// nameWidth so it stays aligned with the table's dynamic first column.
+func (u *ui) rebuildHeader(nameWidth float32) {
+	u.headerRow.RemoveAll()
+	headers := []struct {
+		text  string
+		width float32
+	}{
+		// "Ping" is the gamer term for RTT and implies milliseconds; the
+		// suffix says which statistic of the reply samples it is.
+		{"Server", nameWidth}, {"Ping (med)", metricColWidth}, {"Ping (p1)", metricColWidth},
+		{"Ping (p99)", metricColWidth}, {"Jitter", metricColWidth}, {"Loss", metricColWidth},
+	}
+	for _, h := range headers {
+		label := widget.NewLabel(h.text)
+		label.TextStyle = fyne.TextStyle{Bold: true}
+		u.headerRow.Add(container.NewGridWrap(fyne.NewSize(h.width, label.MinSize().Height), label))
+	}
+}
+
+// refreshTableLayout re-measures the name column against u.rows, updates
+// the table and header widths when it changed, and repaints. Call after
+// every rows rebuild.
+func (u *ui) refreshTableLayout() {
+	w := nameColumnWidth(u.rows)
+	if w != u.nameColWidth {
+		u.nameColWidth = w
+		u.table.SetColumnWidth(0, w)
+		u.rebuildHeader(w)
+	}
+	u.table.Refresh()
+}
+
+// nameColumnWidth returns the width needed for the widest name cell in
+// rows (bold parents measured bold), floored at minNameColWidth.
+func nameColumnWidth(rows [][]tableCell) float32 {
+	w := float32(minNameColWidth)
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		tw := fyne.MeasureText(row[0].text, theme.TextSize(), fyne.TextStyle{Bold: row[0].bold})
+		// Label padding on both sides plus a hair of slack.
+		if cw := tw.Width + 2*theme.Padding() + 2; cw > w {
+			w = cw
+		}
+	}
+	return w
 }
 
 // buildTree constructs the region → city → provider tree, all collapsed.
@@ -210,7 +291,6 @@ func (u *ui) buildRegion(region string) fyne.CanvasObject {
 			}
 		}
 		u.syncing = false
-		u.savePrefs()
 	})
 	rt.check = regionCheck
 
@@ -247,7 +327,6 @@ func (u *ui) buildCity(region string, group CityGroup, rt *regionTree) fyne.Canv
 		u.syncing = false
 		setTriState(cityCheck, checked, false)
 		u.recomputeRegion(region)
-		u.savePrefs()
 	})
 	ct.check = cityCheck
 
@@ -263,7 +342,6 @@ func (u *ui) buildCity(region string, group CityGroup, rt *regionTree) fyne.Canv
 			u.state[server.ID()] = checked
 			u.recomputeCity(region, server.City)
 			u.recomputeRegion(region)
-			u.savePrefs()
 		})
 		chk.Checked = u.state[server.ID()]
 		providersBox.Add(chk)
@@ -271,7 +349,8 @@ func (u *ui) buildCity(region string, group CityGroup, rt *regionTree) fyne.Canv
 		ct.ids = append(ct.ids, server.ID())
 		u.allChecks = append(u.allChecks, chk)
 	}
-	providersBox.Hide()
+	// Visibility is owned by newExpander: a restored-expanded city was
+	// Show()n there, so do not force-hide the box after adding children.
 
 	// Initial tri-state from restored selection.
 	all, some := u.cityStates(region, group.City)
@@ -282,8 +361,9 @@ func (u *ui) buildCity(region string, group CityGroup, rt *regionTree) fyne.Canv
 	return container.NewVBox(header, indent(providersBox))
 }
 
-// newExpander builds a ▸/▾ toggle that shows/hides obj, restoring and
-// persisting its expanded state under nodeKey.
+// newExpander builds a ▸/▾ toggle that shows/hides obj, restoring its
+// expanded state under nodeKey. The updated state map is persisted on
+// exit (see main), not per tap.
 func (u *ui) newExpander(nodeKey string, obj fyne.CanvasObject) *widget.Button {
 	expanded := u.expanded[nodeKey]
 	var btn *widget.Button
@@ -297,7 +377,6 @@ func (u *ui) newExpander(nodeKey string, obj fyne.CanvasObject) *widget.Button {
 			btn.SetText("▸")
 			obj.Hide()
 		}
-		u.saveExpanded()
 	})
 	btn.Importance = widget.LowImportance
 	if expanded {
@@ -308,10 +387,6 @@ func (u *ui) newExpander(nodeKey string, obj fyne.CanvasObject) *widget.Button {
 	}
 	u.allExpanders = append(u.allExpanders, btn)
 	return btn
-}
-
-func (u *ui) saveExpanded() {
-	u.prefs.SetStringList(prefsExpandedKey, expandedToList(u.servers, u.expanded))
 }
 
 func indent(obj fyne.CanvasObject) fyne.CanvasObject {
@@ -362,8 +437,12 @@ func (u *ui) recomputeRegion(region string) {
 	setTriState(rt.check, all, some)
 }
 
-func (u *ui) savePrefs() {
+// saveAllPrefs writes the selection denylist and expansion allowlist.
+// Called once from the window close intercept; the in-memory maps are
+// the live source of truth while the app runs.
+func (u *ui) saveAllPrefs() {
 	u.prefs.SetStringList(prefsDisabledKey, disabledFromState(u.servers, u.state))
+	u.prefs.SetStringList(prefsExpandedKey, expandedToList(u.servers, u.expanded))
 }
 
 // selectedServers returns checked servers across all regions in
@@ -394,25 +473,15 @@ func (u *ui) onTestTap() {
 		return
 	}
 
+	u.tree = newResultsTree()
 	u.rows = nil
 	u.results = nil
-	u.table.Refresh()
+	u.refreshTableLayout()
 	u.setRunning(true)
 	u.statusLabel.SetText(fmt.Sprintf("Testing (0/%d)...", len(selected)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	u.cancel = cancel
-
-	// Track per-city completion so a worst-case summary row can be emitted
-	// once every selected provider of a city has finished.
-	cityTotal := map[string]int{}
-	cityName := map[string]string{}
-	for _, s := range selected {
-		key := cityKey(u.regionBy[s.ID()], s.City)
-		cityTotal[key]++
-		cityName[key] = s.City
-	}
-	cityDone := map[string]int{}
 
 	var (
 		mu            sync.Mutex
@@ -439,20 +508,9 @@ func (u *ui) onTestTap() {
 			func(outcome ServerOutcome) {
 				fyne.Do(func() {
 					u.results = append(u.results, outcome)
-					u.rows = append(u.rows, outcomeRow(outcome))
-
-					key := cityKey(u.regionBy[outcome.Server.ID()], outcome.Server.City)
-					cityDone[key]++
-					if cityDone[key] == cityTotal[key] {
-						var group []ServerOutcome
-						for _, o := range u.results {
-							if cityKey(u.regionBy[o.Server.ID()], o.Server.City) == key {
-								group = append(group, o)
-							}
-						}
-						u.rows = append(u.rows, cityWorstCase(cityName[key], group))
-					}
-					u.table.Refresh()
+					u.tree.addOutcome(u.regionBy[outcome.Server.ID()], outcome)
+					u.rows = u.tree.flatten()
+					u.refreshTableLayout()
 				})
 			},
 		)
@@ -530,15 +588,17 @@ func (u *ui) setRunning(running bool) {
 
 // outcomeRow renders one result row from a finished server test.
 func outcomeRow(outcome ServerOutcome) []tableCell {
-	return resultRow(outcome.Server.DisplayName(), outcome.Result)
+	return resultRow(outcome.Server.DisplayName(), outcome.Result, outcome.Server.Scrubbed)
 }
 
 // resultRow renders one results-table row, coloring numeric cells green
 // (SuccessImportance) at-or-below the CS2 HUD thresholds and red
 // (DangerImportance) above them. With no received replies there is nothing
 // to grade, so RTT cells stay uncolored; loss still grades (0-of-640 is
-// a meaningful 100%).
-func resultRow(name string, r PingResult) []tableCell {
+// a meaningful 100%). Scrubbed endpoints cannot report loss or jitter
+// (their ICMP responder is a DDoS scrubber, not the path), so those cells
+// show n/a uncolored instead of a misleading number.
+func resultRow(name string, r PingResult, scrubbed bool) []tableCell {
 	nameCell := tableCell{text: name}
 	if r.Err != nil {
 		return []tableCell{
@@ -551,72 +611,20 @@ func resultRow(name string, r PingResult) []tableCell {
 		}
 	}
 	rttOK := r.Recv > 0
+	jitterCell := tableCell{formatMS(r.Jitter), gradeMS(r.Jitter, jitterThreshold, rttOK), false}
+	lossCell := tableCell{fmt.Sprintf("%.2f%%", r.LossPercent), gradePct(r.LossPercent), false}
+	if scrubbed {
+		jitterCell = tableCell{"n/a", widget.MediumImportance, false}
+		lossCell = tableCell{"n/a", widget.MediumImportance, false}
+	}
 	return []tableCell{
 		nameCell,
-		{formatMS(r.Avg), gradeMS(r.Avg, pingThreshold, rttOK), false},
-		{formatMS(r.Min), gradeMS(r.Min, pingThreshold, rttOK), false},
-		{formatMS(r.Max), gradeMS(r.Max, pingThreshold, rttOK), false},
-		{formatMS(r.Jitter), gradeMS(r.Jitter, jitterThreshold, rttOK), false},
-		{fmt.Sprintf("%.2f%%", r.LossPercent), gradePct(r.LossPercent), false},
+		{formatMS(r.Median), gradeMS(r.Median, pingThreshold, rttOK), false},
+		{formatMS(r.P1), gradeMS(r.P1, pingThreshold, rttOK), false},
+		{formatMS(r.P99), gradeMS(r.P99, pingThreshold, rttOK), false},
+		jitterCell,
+		lossCell,
 	}
-}
-
-// cityWorstCase builds the summary row shown after every selected provider
-// of a city has been tested: column-by-column worst values across the
-// city's outcomes (players cannot choose their provider, so this is what
-// they might actually get). Errored providers are skipped for the numeric
-// columns; if every provider errored, the first error is shown. The name
-// cell is bold.
-func cityWorstCase(city string, outcomes []ServerOutcome) []tableCell {
-	var worst PingResult
-	have := false
-	var firstErr error
-	for _, o := range outcomes {
-		r := o.Result
-		if r.Err != nil {
-			if firstErr == nil {
-				firstErr = r.Err
-			}
-			continue
-		}
-		if !have {
-			worst = r
-			have = true
-			continue
-		}
-		if r.Recv > worst.Recv {
-			worst.Recv = r.Recv
-		}
-		if r.Avg > worst.Avg {
-			worst.Avg = r.Avg
-		}
-		if r.Min > worst.Min {
-			worst.Min = r.Min
-		}
-		if r.Max > worst.Max {
-			worst.Max = r.Max
-		}
-		if r.Jitter > worst.Jitter {
-			worst.Jitter = r.Jitter
-		}
-		if r.LossPercent > worst.LossPercent {
-			worst.LossPercent = r.LossPercent
-		}
-	}
-	name := city + " (worst)"
-	if !have {
-		row := resultRow(name, PingResult{Err: firstErr})
-		row[0].bold = true
-		return row
-	}
-	row := resultRow(name, worst)
-	row[0].bold = true
-	return row
-}
-
-// cityKey identifies a city uniquely across regions for grouping.
-func cityKey(region, city string) string {
-	return region + "/" + city
 }
 
 // gradeMS returns SuccessImportance at-or-below threshold and
@@ -640,4 +648,153 @@ func gradePct(p float64) widget.Importance {
 
 func formatMS(d time.Duration) string {
 	return fmt.Sprintf("%.1f", float64(d.Microseconds())/1000.0)
+}
+
+// onIdentifyTap opens the connect-string lookup dialog: paste a CS2
+// connect command (or any text containing the server address), look it
+// up via RDAP, and see which hosting provider — and which of our tested
+// locations — it maps to. The dialog opens compact and only grows to fit
+// a returned report.
+func (u *ui) onIdentifyTap() {
+	entry := widget.NewEntry()
+	entry.SetPlaceHolder("connect 198.244.202.178:27015")
+	result := widget.NewLabel("Paste a connect string (or any text containing the server address), then Look up.")
+	result.Wrapping = fyne.TextWrapWord
+	scroll := container.NewVScroll(result)
+	scroll.SetMinSize(fyne.NewSize(440, 56))
+
+	pasteBtn := widget.NewButtonWithIcon("Paste", theme.ContentPasteIcon(), func() {
+		if c := u.window.Clipboard(); c != nil {
+			entry.SetText(c.Content())
+		}
+	})
+	top := container.NewBorder(nil, nil, nil, pasteBtn, entry)
+
+	// Declare before NewButton: the closures reference lookupBtn/d, whose
+	// scope starts after the := statement (same gotcha as the check tree).
+	var (
+		d         *dialog.CustomDialog
+		lookupBtn *widget.Button
+	)
+	lookupBtn = widget.NewButton("Look up", func() {
+		raw := entry.Text
+		if strings.TrimSpace(raw) == "" {
+			result.SetText("Nothing to look up — paste a connect string first.")
+			return
+		}
+		lookupBtn.Disable()
+		result.SetText("Looking up…")
+		go func() {
+			text := u.identifyText(context.Background(), raw)
+			fyne.Do(func() {
+				result.SetText(text)
+				lookupBtn.Enable()
+				fitIdentifyDialog(d, scroll, result, text)
+			})
+		}()
+	})
+	lookupBtn.Importance = widget.HighImportance
+	closeBtn := widget.NewButton("Close", func() { d.Hide() })
+
+	// Own the bottom row (WithoutButtons — NewCustom always renders a
+	// dismiss button, even with empty text): Close bottom-left, Look up
+	// bottom-right, neither stretched.
+	buttons := container.NewHBox(closeBtn, layout.NewSpacer(), lookupBtn)
+	body := container.NewBorder(nil, buttons, nil, nil, container.NewVBox(top, scroll))
+	d = dialog.NewCustomWithoutButtons("Identify server", body, u.window)
+	d.Show()
+}
+
+// fitIdentifyDialog grows the report area (and the dialog with it) to
+// the lookup result; hints and short errors keep the dialog compact.
+func fitIdentifyDialog(d *dialog.CustomDialog, scroll *container.Scroll, result *widget.Label, text string) {
+	h := identifyScrollHeight(text, result.MinSize().Height)
+	scroll.SetMinSize(fyne.NewSize(440, h))
+	if d != nil {
+		// entry + scroll + button row + paddings.
+		d.Resize(fyne.NewSize(520, h+140))
+	}
+}
+
+// identifyScrollHeight is the report-area height for a result. Word
+// wrapping adds visual lines the logical line count misses, so use the
+// label's measured height when it is larger; floor high enough that the
+// common happy-path report fits without scrolling, cap with scroll
+// taking over for long city lists.
+func identifyScrollHeight(text string, measured float32) float32 {
+	h := float32(strings.Count(text, "\n")+1) * 22
+	if measured > h {
+		h = measured
+	}
+	if h < 160 {
+		return 160
+	}
+	if h > 320 {
+		return 320
+	}
+	return h
+}
+
+// identifyText runs one lookup and renders it for the dialog. Lookup
+// errors are shown inline rather than failing the whole report.
+func (u *ui) identifyText(ctx context.Context, raw string) string {
+	res := identifyTarget(ctx, raw, u.servers)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Target:   %s\n", res.Display())
+	if res.IP != "" && res.IP != res.Host {
+		fmt.Fprintf(&b, "Address:  %s\n", res.IP)
+	}
+	if res.Err != nil {
+		fmt.Fprintf(&b, "Error:    %v", res.Err)
+		return b.String()
+	}
+	if res.Exact != nil {
+		fmt.Fprintf(&b, "Known speedtest host in our list.\nProvider: %s · %s · %s",
+			u.regionBy[res.Exact.ID()], res.Exact.City, res.Exact.Provider)
+		return b.String()
+	}
+	fmt.Fprintf(&b, "RDAP:     %s\n", orDash(res.Registrant))
+	if res.Netname != "" {
+		fmt.Fprintf(&b, "Netname:  %s\n", res.Netname)
+	}
+	if res.Country != "" {
+		fmt.Fprintf(&b, "Country:  %s\n", res.Country)
+	}
+	if len(res.PTR) > 0 {
+		fmt.Fprintf(&b, "PTR:      %s\n", res.PTR[0])
+	}
+	if res.Provider == "" {
+		b.WriteString("Provider: (unrecognized — see RDAP above)")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "Provider: %s\n\nTested locations with this provider:\n", res.Provider)
+	matched := citiesWithProvider(u.servers, res.Provider)
+	if len(matched) == 0 {
+		b.WriteString("  (none in the server list)")
+		return b.String()
+	}
+	for _, m := range matched {
+		var outs []ServerOutcome
+		for _, o := range u.results {
+			if o.Server.Provider == res.Provider && o.Server.City == m.City &&
+				u.regionBy[o.Server.ID()] == m.Region {
+				outs = append(outs, o)
+			}
+		}
+		if len(outs) == 0 {
+			fmt.Fprintf(&b, "  %s · %s — not tested\n", m.Region, m.City)
+			continue
+		}
+		row := worstCase("", outs)
+		fmt.Fprintf(&b, "  %s · %s — med %s, p99 %s, jitter %s, loss %s\n",
+			m.Region, m.City, row[1].text, row[3].text, row[4].text, row[5].text)
+	}
+	return b.String()
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }

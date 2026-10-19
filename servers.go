@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,10 +10,24 @@ import (
 
 // Server is one testable endpoint. City roughly matches a FACEIT location;
 // Provider is the hosting label from the official HiperZ test scripts.
+// MaxPPS caps the probe send rate for providers with a known ICMP policer
+// (0 = default 64 pps); ProbeSize overrides the ICMP payload in bytes for
+// providers that filter large echo packets (0 = default 600). Scrubbed
+// marks endpoints whose ICMP responder sits behind a DDoS scrubber: replies
+// are capped at ~1/sec under load and low-rate probes are dropped at
+// random, so loss and jitter are not measurable and are reported as n/a.
 type Server struct {
-	City     string `json:"city"`
-	Provider string `json:"provider"`
-	Host     string `json:"host"`
+	City      string `json:"city"`
+	Provider  string `json:"provider"`
+	Host      string `json:"host"`
+	MaxPPS    int    `json:"max_pps,omitempty"`
+	ProbeSize int    `json:"probe_size,omitempty"`
+	Scrubbed  bool   `json:"scrubbed,omitempty"`
+}
+
+// srv is shorthand for a server without pacing/size overrides.
+func srv(city, provider, host string) Server {
+	return Server{City: city, Provider: provider, Host: host}
 }
 
 // ID is a stable identifier for UI state keyed per server.
@@ -31,108 +46,117 @@ var RegionOrder = []string{"NA", "EU", "SA", "SEA", "OCE"}
 
 // embeddedServers is trimmed to locations FACEIT currently offers. City
 // groups rename hiperz endpoints (lax→San Jose, ny→Virginia, de→Germany,
-// etc.) to match FACEIT's client. Providers and hosts are transcribed from
-// the official HiperZ test scripts.
+// etc.) to match FACEIT's client. Providers are the hosting companies that
+// own the endpoints per RDAP registration (the HiperZ scripts used opaque
+// codenames — O→OVH, PS→Psychz, m→MyLoc, a→Altus Host, etc.); hosts are
+// transcribed from the official HiperZ test scripts, except Chicago.NFOservers
+// which comes from NFOservers' own network page (the HiperZ IP was retired;
+// see PACKET_LOSS_FINDINGS.md). MaxPPS values are measured ICMP policer
+// quotas minus a ~10% margin; Scrubbed marks the one DDoS-scrubbed
+// endpoint whose loss cannot be measured at all.
 var embeddedServers = map[string][]Server{
 	"NA": {
 		// San Jose
-		{"San Jose", "hz", "167.160.91.2"},
-		{"San Jose", "cdn77", "185.152.67.2"},
-		{"San Jose", "webnx", "mirrors-lax.webnx.com"},
-		{"San Jose", "colocrossing", "107.175.180.6"},
+		srv("San Jose", "Dedicated.com", "167.160.91.2"),
+		srv("San Jose", "Datacamp", "185.152.67.2"),
+		srv("San Jose", "WebNX", "mirrors-lax.webnx.com"),
+		srv("San Jose", "HostPapa", "107.175.180.6"),
 		// Denver
-		{"Denver", "cdn77", "84.17.63.1"},
-		{"Denver", "handy", "173.248.162.1"},
+		srv("Denver", "Datacamp", "84.17.63.1"),
+		srv("Denver", "Handy Networks", "173.248.162.1"),
 		// Dallas
-		{"Dallas", "PS", "108.181.54.9"},
-		{"Dallas", "GSL", "66.23.201.30"},
-		{"Dallas", "hivelocity", "speedtest.dal.hivelocity.net"},
-		{"Dallas", "cdn77", "89.187.164.1"},
-		{"Dallas", "colocrossing", "192.3.237.150"},
-		{"Dallas", "RIOT", "104.160.151.182"},
+		srv("Dallas", "Psychz Networks", "108.181.54.9"),
+		srv("Dallas", "Dedicated.com", "66.23.201.30"),
+		// Hivelocity's ICMP responder is behind a DDoS scrubber: it answers
+		// exactly ~1 echo reply/sec under load (any rate/size/payload) and
+		// drops low-rate v4 probes at random, so loss/jitter are not
+		// measurable — see PACKET_LOSS_FINDINGS.md. Probe at the default
+		// rate for RTT samples; stats are marked Scrubbed.
+		{City: "Dallas", Provider: "Hivelocity", Host: "speedtest.dal.hivelocity.net", Scrubbed: true},
+		srv("Dallas", "Datacamp", "89.187.164.1"),
+		srv("Dallas", "HostPapa", "192.3.237.150"),
+		srv("Dallas", "Riot Games", "104.160.151.182"),
 		// Chicago
-		{"Chicago", "PS", "108.181.62.197"},
-		{"Chicago", "cdn77", "185.93.1.65"},
-		{"Chicago", "GSL", "103.214.111.228"},
-		{"Chicago", "v", "104.128.48.3"},
-		{"Chicago", "colocrossing", "66.225.198.198"},
-		{"Chicago", "nfo", "216.52.148.47"},
+		srv("Chicago", "Psychz Networks", "108.181.62.197"),
+		srv("Chicago", "Datacamp", "185.93.1.65"),
+		srv("Chicago", "End of Reality", "103.214.111.228"),
+		srv("Chicago", "HostVenom", "104.128.48.3"),
+		srv("Chicago", "HostPapa", "66.225.198.198"),
+		// NFOservers filters ICMP payloads above ~56 bytes entirely
+		// (600-byte probes drop 100% at any rate); small packets are clean
+		// at 64pps.
+		{City: "Chicago", Provider: "NFOservers", Host: "74.91.113.173", ProbeSize: 56},
 		// Virginia
-		{"Virginia", "hz", "172.93.99.1"},
-		{"Virginia", "cdn77", "185.59.223.8"},
-		{"Virginia", "gsl", "66.23.200.20"},
+		srv("Virginia", "ReliableSite", "172.93.99.1"),
+		srv("Virginia", "Datacamp", "185.59.223.8"),
+		srv("Virginia", "Dedicated.com", "66.23.200.20"),
 	},
 	"EU": {
 		// France
-		{"France", "O", "54.37.87.229"},
-		{"France", "cdn77", "185.93.2.193"},
+		{City: "France", Provider: "OVH", Host: "54.37.87.229", MaxPPS: 45},
+		srv("France", "Datacamp", "185.93.2.193"),
 		// UK
-		{"UK", "O", "198.244.202.178"},
-		{"UK", "hydra", "185.38.150.1"},
-		{"UK", "cdn77", "185.59.221.51"},
+		// OVH UK's policer quota is exactly ~105 replies per 10s at any
+		// send rate up to 64pps.
+		{City: "UK", Provider: "OVH", Host: "198.244.202.178", MaxPPS: 9},
+		srv("UK", "Hydra", "185.38.150.1"),
+		srv("UK", "Datacamp", "185.59.221.51"),
 		// Germany
-		{"Germany", "m", "85.114.146.1"},
-		{"Germany", "h", "fsn.icmp.hetzner.com"},
-		{"Germany", "O", "145.239.244.75"},
-		{"Germany", "cdn77", "185.102.219.93"},
-		{"Germany", "ckras", "83.141.29.20"},
+		srv("Germany", "MyLoc", "85.114.146.1"),
+		srv("Germany", "Hetzner", "fsn.icmp.hetzner.com"),
+		{City: "Germany", Provider: "OVH", Host: "145.239.244.75", MaxPPS: 45},
+		srv("Germany", "Datacamp", "185.102.219.93"),
+		srv("Germany", "Aixit", "83.141.29.20"),
 		// Netherlands
-		{"Netherlands", "hz", "mirror.nforce.com"},
-		{"Netherlands", "ws", "iperf.worldstream.nl"},
-		{"Netherlands", "gcp.west4.premium", "34.91.82.186"},
-		{"Netherlands", "cdn77", "185.102.218.1"},
-		{"Netherlands", "leaseweb", "mirror.nl.leaseweb.net"},
-		{"Netherlands", "i3d", "mirror.i3d.net"},
+		srv("Netherlands", "NForce", "mirror.nforce.com"),
+		srv("Netherlands", "WorldStream", "iperf.worldstream.nl"),
+		srv("Netherlands", "Google Cloud (West4 Premium)", "34.91.82.186"),
+		srv("Netherlands", "Datacamp", "185.102.218.1"),
+		srv("Netherlands", "Leaseweb", "mirror.nl.leaseweb.net"),
+		srv("Netherlands", "i3D.net", "mirror.i3d.net"),
 		// Sweden
-		{"Sweden", "a", "79.142.78.1"},
-		{"Sweden", "m", "speed.se.m247.ro"},
-		{"Sweden", "cdn77", "185.76.9.135"},
-		{"Sweden", "frag", "185.62.206.1"},
-		{"Sweden", "excellent", "178.236.67.35"},
+		srv("Sweden", "Altus Host", "79.142.78.1"),
+		srv("Sweden", "Datacamp", "185.76.9.135"),
+		srv("Sweden", "Fragnet", "185.62.206.1"),
 		// Finland
-		{"Finland", "hetzner", "hel.icmp.hetzner.com"},
+		srv("Finland", "Hetzner", "hel.icmp.hetzner.com"),
 		// Moscow
-		{"Moscow", "ps1", "140.174.177.1"},
-		{"Moscow", "ps2", "108.181.60.1"},
-		{"Moscow", "edge", "92.38.138.1"},
-		{"Moscow", "rsmedia", "62.122.214.254"},
+		{City: "Moscow", Provider: "NTT", Host: "140.174.177.1", MaxPPS: 27},
+		{City: "Moscow", Provider: "Psychz Networks", Host: "108.181.60.1", MaxPPS: 20},
+		srv("Moscow", "EdgeCenter", "92.38.138.1"),
 	},
 	"SA": {
 		// Lima
-		{"Lima", "cdn77", "79.127.252.129"},
+		srv("Lima", "Datacamp", "79.127.252.129"),
 		// São Paulo
-		{"São Paulo", "cdn77", "138.199.4.1"},
-		{"São Paulo", "maxiSP1", "177.54.147.60"},
-		{"São Paulo", "maxiSP2", "103.14.27.97"},
-		{"São Paulo", "gcp", "34.95.203.40"},
-		{"São Paulo", "i3d", "185.50.104.53"},
-		{"São Paulo", "gcore", "5.188.238.1"},
-		{"São Paulo", "aws", "54.207.127.254"},
+		srv("São Paulo", "Datacamp", "138.199.4.1"),
+		srv("São Paulo", "Latitude.sh SP1", "177.54.147.60"),
+		srv("São Paulo", "Latitude.sh SP2", "103.14.27.97"),
+		srv("São Paulo", "Google Cloud", "34.95.203.40"),
+		srv("São Paulo", "i3D.net", "185.50.104.53"),
+		srv("São Paulo", "G-Core", "5.188.238.1"),
+		srv("São Paulo", "AWS", "54.207.127.254"),
 		// Santiago
-		{"Santiago", "maxi", "45.250.252.51"},
+		srv("Santiago", "Latitude.sh", "45.250.252.51"),
 		// Buenos Aires
-		{"Buenos Aires", "maxi", "103.106.58.59"},
-		{"Buenos Aires", "inet", "186.148.224.119"},
-		{"Buenos Aires", "cdn77", "169.150.214.140"},
+		// Quota is exactly ~304 replies per 10s at 64 and 128pps.
+		{City: "Buenos Aires", Provider: "Latitude.sh", Host: "103.106.58.59", MaxPPS: 27},
+		srv("Buenos Aires", "Datacamp", "169.150.214.140"),
 	},
 	"SEA": {
-		{"Singapore", "cdn77", "89.187.162.1"},
-		{"Singapore", "O", "sgp.lg.ovh.net"},
-		{"Singapore", "GCP.premium", "35.198.228.5"},
-		{"Singapore", "sggs", "103.14.247.1"},
-		{"Singapore", "LW", "mirror.sg.leaseweb.net"},
-		{"Singapore", "PS", "103.126.138.20"},
-		{"Singapore", "gcore", "92.223.85.8"},
-		{"Singapore", "streamline", "103.62.48.1"},
-		{"Singapore", "softlayer", "speedtest.sng01.softlayer.com"},
-		{"Singapore", "aws", "46.51.216.14"},
+		srv("Singapore", "Datacamp", "89.187.162.1"),
+		{City: "Singapore", Provider: "OVH", Host: "sgp.lg.ovh.net", MaxPPS: 45},
+		srv("Singapore", "Google Cloud (Premium)", "35.198.228.5"),
+		srv("Singapore", "SGGS", "103.14.247.1"),
+		srv("Singapore", "Leaseweb", "mirror.sg.leaseweb.net"),
+		srv("Singapore", "G-Core", "92.223.85.8"),
+		srv("Singapore", "AWS", "46.51.216.14"),
 	},
 	"OCE": {
-		{"Sydney", "O", "51.161.196.31"},
-		{"Sydney", "GSL", "103.212.227.31"},
-		{"Sydney", "cdn77", "143.244.63.144"},
-		{"Sydney", "sau", "27.50.68.245"},
-		{"Sydney", "softlayer", "speedtest.syd01.softlayer.com"},
+		{City: "Sydney", Provider: "OVH", Host: "51.161.196.31", MaxPPS: 45},
+		srv("Sydney", "Keystone Servers", "103.212.227.31"),
+		srv("Sydney", "Datacamp", "143.244.63.144"),
+		srv("Sydney", "Servers Australia", "27.50.68.245"),
 	},
 }
 
@@ -177,16 +201,44 @@ func loadServersJSON() (map[string][]Server, error) {
 		if err != nil {
 			continue
 		}
-		var servers map[string][]Server
-		if err := json.Unmarshal(data, &servers); err != nil {
+		servers, err := parseServersJSON(data)
+		if err != nil {
 			return nil, err
 		}
-		if len(servers) == 0 {
-			continue
+		if servers != nil {
+			return servers, nil
 		}
-		return servers, nil
 	}
 	return nil, nil
+}
+
+// parseServersJSON decodes an override file. It has full parity with the
+// embedded table: entries carry city/provider/host plus optional max_pps,
+// probe_size, and scrubbed fields. It returns (nil, nil) for an empty
+// document (treated as no override) and an error for incomplete or
+// out-of-range entries.
+func parseServersJSON(data []byte) (map[string][]Server, error) {
+	var servers map[string][]Server
+	if err := json.Unmarshal(data, &servers); err != nil {
+		return nil, err
+	}
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	for region, list := range servers {
+		for i, s := range list {
+			if s.City == "" || s.Provider == "" || s.Host == "" {
+				return nil, fmt.Errorf("%s[%d]: entry missing city, provider, or host", region, i)
+			}
+			if s.MaxPPS < 0 {
+				return nil, fmt.Errorf("%s/%s: max_pps must be >= 0", s.City, s.Provider)
+			}
+			if s.ProbeSize < 0 {
+				return nil, fmt.Errorf("%s/%s: probe_size must be >= 0", s.City, s.Provider)
+			}
+		}
+	}
+	return servers, nil
 }
 
 // regionNames returns regions to show: RegionOrder first, then any extra

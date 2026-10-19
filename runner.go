@@ -32,10 +32,11 @@ func runTests(
 		}
 		onStatus(srv.DisplayName(), i+1, total)
 
-		// Full budget: probeWindow for sending (bounded by probeCount),
-		// then replyGrace of receive-only time for in-flight replies.
+		// Full budget: probeWindow for sending (bounded by the paced
+		// probe count), then replyGrace of receive-only time for
+		// in-flight replies.
 		serverCtx, cancel := context.WithTimeout(ctx, probeWindow+replyGrace)
-		result := probeHost(serverCtx, srv.Host, onTick)
+		result := probeHost(serverCtx, srv.Host, srv.MaxPPS, srv.ProbeSize, onTick)
 		cancel()
 
 		onDone(ServerOutcome{Server: srv, Result: result})

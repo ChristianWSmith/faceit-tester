@@ -66,10 +66,11 @@ func TestEmbeddedServersCoverAllRegions(t *testing.T) {
 		}
 		total += len(servers)
 	}
-	// Trimmed to FACEIT-official locations: 21 NA + 26 EU + 12 SA + 10 SEA
-	// + 5 OCE = 74.
-	if total != 74 {
-		t.Errorf("total embedded servers = %d, want 74", total)
+	// Trimmed to FACEIT-official locations: 21 NA + 23 EU + 11 SA + 7 SEA
+	// + 4 OCE = 66. Dead HiperZ endpoints removed and Chicago.NFOservers
+	// replaced per PACKET_LOSS_FINDINGS.md.
+	if total != 66 {
+		t.Errorf("total embedded servers = %d, want 66", total)
 	}
 }
 
@@ -93,9 +94,9 @@ func TestFaceitCityNames(t *testing.T) {
 
 func TestGroupByCity(t *testing.T) {
 	servers := []Server{
-		{"Chicago", "PS", "108.181.62.197"},
-		{"Dallas", "PS", "108.181.54.9"},
-		{"Chicago", "cdn77", "185.93.1.65"},
+		srv("Chicago", "Psychz Networks", "108.181.62.197"),
+		srv("Dallas", "Psychz Networks", "108.181.54.9"),
+		srv("Chicago", "Datacamp", "185.93.1.65"),
 	}
 	groups := groupByCity(servers)
 	if len(groups) != 2 {
@@ -124,8 +125,8 @@ func TestRegionNamesOrder(t *testing.T) {
 
 func TestRegionNamesIncludesOverrideOnlyRegions(t *testing.T) {
 	servers := map[string][]Server{
-		"MARS": {{"Phobos", "test", "10.0.0.1"}},
-		"NA":   {{"Chicago", "PS", "108.181.62.197"}},
+		"MARS": {srv("Phobos", "test", "10.0.0.1")},
+		"NA":   {srv("Chicago", "Psychz Networks", "108.181.62.197")},
 	}
 	got := regionNames(servers)
 	if got[0] != "NA" {
@@ -137,11 +138,138 @@ func TestRegionNamesIncludesOverrideOnlyRegions(t *testing.T) {
 }
 
 func TestServerIDAndDisplayName(t *testing.T) {
-	s := Server{"San Jose", "hz", "167.160.91.2"}
-	if s.ID() != "San Jose.hz" {
-		t.Errorf("ID() = %q, want %q", s.ID(), "San Jose.hz")
+	s := srv("San Jose", "Dedicated.com", "167.160.91.2")
+	if s.ID() != "San Jose.Dedicated.com" {
+		t.Errorf("ID() = %q, want %q", s.ID(), "San Jose.Dedicated.com")
 	}
-	if s.DisplayName() != "San Jose.hz" {
+	if s.DisplayName() != "San Jose.Dedicated.com" {
 		t.Errorf("DisplayName() = %q", s.DisplayName())
+	}
+}
+
+// TestServerListMatchesFindings pins the embedded list to the packet-loss
+// investigation in PACKET_LOSS_FINDINGS.md: the NFO replacement host with
+// its small-payload override, the nine ICMP policer caps, and the retired
+// endpoints that must stay gone.
+func TestServerListMatchesFindings(t *testing.T) {
+	byID := map[string]Server{}
+	for _, region := range RegionOrder {
+		for _, s := range embeddedServers[region] {
+			byID[s.ID()] = s
+		}
+	}
+
+	// Replacement: NFOservers moved off the retired 216.52.148.47; the new
+	// IP filters large ICMP payloads, so it must probe at 56 bytes.
+	nfo, ok := byID["Chicago.NFOservers"]
+	if !ok {
+		t.Fatal("Chicago.NFOservers missing")
+	}
+	if nfo.Host != "74.91.113.173" {
+		t.Errorf("Chicago.NFOservers host = %q, want 74.91.113.173", nfo.Host)
+	}
+	if nfo.ProbeSize != 56 {
+		t.Errorf("Chicago.NFOservers ProbeSize = %d, want 56", nfo.ProbeSize)
+	}
+	if nfo.MaxPPS != 0 {
+		t.Errorf("Chicago.NFOservers MaxPPS = %d, want 0 (no rate cap)", nfo.MaxPPS)
+	}
+
+	// Measured ICMP policer quotas (see findings doc for rate curves).
+	wantPPS := map[string]int{
+		"UK.OVH":                   9,
+		"France.OVH":               45,
+		"Germany.OVH":              45,
+		"Singapore.OVH":            45,
+		"Sydney.OVH":               45,
+		"Buenos Aires.Latitude.sh": 27,
+		"Moscow.NTT":               27,
+		"Moscow.Psychz Networks":   20,
+	}
+	for id, want := range wantPPS {
+		s, ok := byID[id]
+		if !ok {
+			t.Errorf("%s missing from embedded servers", id)
+			continue
+		}
+		if s.MaxPPS != want {
+			t.Errorf("%s MaxPPS = %d, want %d", id, s.MaxPPS, want)
+		}
+	}
+
+	// Hivelocity sits behind a DDoS scrubber (not a plain policer): loss
+	// is unmeasurable, so it must be Scrubbed at the default probe rate.
+	hv, ok := byID["Dallas.Hivelocity"]
+	if !ok {
+		t.Fatal("Dallas.Hivelocity missing")
+	}
+	if !hv.Scrubbed {
+		t.Error("Dallas.Hivelocity should be Scrubbed")
+	}
+	if hv.MaxPPS != 0 || hv.ProbeSize != 0 {
+		t.Errorf("Dallas.Hivelocity overrides = (MaxPPS %d, ProbeSize %d), want (0, 0)", hv.MaxPPS, hv.ProbeSize)
+	}
+
+	// Retired endpoints: dead hosts with no replacement. IDs use the
+	// pre-rename HiperZ codenames as documented in PACKET_LOSS_FINDINGS.md.
+	for _, id := range []string{
+		"Sweden.m", "Sweden.excellent", "Moscow.rsmedia",
+		"Buenos Aires.inet", "Singapore.PS", "Singapore.streamline",
+		"Singapore.softlayer", "Sydney.softlayer",
+	} {
+		if _, ok := byID[id]; ok {
+			t.Errorf("retired endpoint %s still present", id)
+		}
+	}
+}
+
+func TestParseServersJSONParity(t *testing.T) {
+	// Override files carry the same fields as the embedded table.
+	data := []byte(`{
+		"EU": [
+			{"city": "UK", "provider": "OVH", "host": "198.244.202.178", "max_pps": 9},
+			{"city": "Chicago2", "provider": "NFOservers", "host": "74.91.113.173", "probe_size": 56},
+			{"city": "Plain", "provider": "p", "host": "10.0.0.1"},
+			{"city": "Scrub", "provider": "s", "host": "10.0.0.2", "scrubbed": true}
+		]
+	}`)
+	servers, err := parseServersJSON(data)
+	if err != nil {
+		t.Fatalf("parseServersJSON: %v", err)
+	}
+	list := servers["EU"]
+	if len(list) != 4 {
+		t.Fatalf("got %d entries, want 4", len(list))
+	}
+	if list[0].MaxPPS != 9 || list[0].ProbeSize != 0 {
+		t.Errorf("paced entry = %+v, want MaxPPS 9", list[0])
+	}
+	if list[1].ProbeSize != 56 || list[1].MaxPPS != 0 {
+		t.Errorf("sized entry = %+v, want ProbeSize 56", list[1])
+	}
+	if list[2].MaxPPS != 0 || list[2].ProbeSize != 0 || list[2].Scrubbed {
+		t.Errorf("plain entry = %+v, want zero overrides", list[2])
+	}
+	if !list[3].Scrubbed {
+		t.Errorf("scrubbed entry = %+v, want Scrubbed true", list[3])
+	}
+
+	// Empty document means "no override", not an empty server set.
+	if got, err := parseServersJSON([]byte(`{}`)); err != nil || got != nil {
+		t.Errorf("empty doc = (%v, %v), want (nil, nil)", got, err)
+	}
+
+	// Incomplete and out-of-range entries are rejected.
+	bad := []string{
+		`{"EU": [{"city": "", "provider": "p", "host": "10.0.0.1"}]}`,
+		`{"EU": [{"city": "C", "provider": "", "host": "10.0.0.1"}]}`,
+		`{"EU": [{"city": "C", "provider": "p", "host": ""}]}`,
+		`{"EU": [{"city": "C", "provider": "p", "host": "10.0.0.1", "max_pps": -1}]}`,
+		`{"EU": [{"city": "C", "provider": "p", "host": "10.0.0.1", "probe_size": -5}]}`,
+	}
+	for _, doc := range bad {
+		if _, err := parseServersJSON([]byte(doc)); err == nil {
+			t.Errorf("parseServersJSON(%s) succeeded, want error", doc)
+		}
 	}
 }

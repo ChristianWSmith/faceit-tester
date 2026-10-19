@@ -11,7 +11,7 @@ CS2-like rates (64pps, 600-byte payloads, 10s per server) via ICMP.
 ```sh
 go vet ./...
 go test -short ./...    # -short skips network smoke tests (what CI runs)
-go test ./...           # includes live pings to 1.1.1.1
+go test ./...           # includes live pings (1.1.1.1, paced OVH UK, NFO 56B)
 go build
 ```
 
@@ -39,6 +39,14 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
 - **Fyne threading (2.6+):** all widget mutations from background goroutines
   must be wrapped in `fyne.Do(...)`. Button/entry callbacks already run on
   the UI thread.
+- **Results header alignment:** `Table.findX` inserts `SizeNamePadding`
+  *between* columns, so the hand-built header row must be a plain `HBox`
+  (same padding between children) with no outer `NewPadded` wrapper —
+  zero-gap or padded-wrong headers drift progressively against the body.
+  Table and header column widths must always come from the same constants.
+- **`dialog.NewCustom` always renders its dismiss button**, even with an
+  empty text (invisible stub). Use `NewCustomWithoutButtons` when the
+  content owns its own bottom button row.
 - **pro-bing `Timeout` is a whole-run timer**, not per-packet. Never set it
   short — pacing is controlled by `Count` + context deadline. After Count
   sends finish, the run keeps receiving until the context expires; the
@@ -55,34 +63,89 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   Test button is disabled with a message when not elevated. Linux tries
   unprivileged udp4 sockets, falls back to raw on permission errors
   (`isPermissionErr` matches several platform-specific strings).
-- **Do not add per-server ICMP rate limits.** We tried: derived limits from
-  a full probe run, but hivelocity experiments (identical runs giving
-  0–3/8 replies, non-monotonic vs send rate, IPv6 clean vs IPv4 lossy)
-  proved throttling is indistinguishable from path loss. Every server probes
-  at fixed 64pps; bad endpoints just report their loss honestly.
+- **Per-server ICMP policers exist; measure them with rate curves.** Some
+  providers (OVH fleet, Moscow PS, BA Latitude.sh) answer ICMP
+  at a fixed token quota regardless of send rate — a *limiter* keeps the
+  absolute recv count constant across rates (e.g. OVH UK: exactly ~105
+  replies at 16/32/64pps) and delivers 100% at low rates, while real path
+  loss keeps the *loss percentage* constant. `Server.MaxPPS` probes under
+  the measured quota (~10% margin) so loss reflects the path, not the
+  policer. Values and evidence: `PACKET_LOSS_FINDINGS.md`. Do not copy
+  MaxPPS without a rate curve — the old Hivelocity 8-packet experiments
+  that "proved" throttling was indistinguishable from loss were too short
+  to see the quota.
+- **Some endpoints are DDoS-scrubbed, not just rate-limited.**
+  Hivelocity (Dallas) answers exactly 1 echo reply/sec under load and
+  drops 1pps IPv4 probes at random (payload/interval/idle all irrelevant;
+  v6 slightly better) — loss is unmeasurable, so it carries
+  `Server.Scrubbed: true`: probed at the default rate for RTT only,
+  loss/jitter render as uncolored "n/a" (UI) or blank + `icmp-scrubbed`
+  note (CSV), and are excluded from city worst-loss summaries. Never
+  "fix" a scrubbed host with MaxPPS — 1pps lands in the stochastic
+  regime and makes the report noisier, not better.
+- **Some providers filter large ICMP payloads entirely** (NFO: 600-byte
+  echo drops 100% at any rate; 56-byte clean at 64pps).
+  `Server.ProbeSize` overrides the payload per server (0 = 600 default).
 
 ## Architecture (all in package main)
 
 - `servers.go` — embedded server tables (region → city → provider), trimmed
   to FACEIT-official locations with FACEIT city names (lax→San Jose,
-  ny→Virginia). Transcribed from the official HiperZ test scripts.
-  `servers.json` next to the exe replaces the lists entirely (city/provider/
-  host JSON schema).
+  ny→Virginia). Providers are RDAP-resolved hosting company names (the
+  HiperZ scripts used codenames: O→OVH, PS→Psychz Networks, hz→split across
+  Dedicated.com/ReliableSite/NForce, maxi→Latitude.sh, etc.). Eight dead
+  endpoints were removed and Chicago.NFOservers moved to NFO's current
+  example IP (74.91.113.173, ProbeSize 56 — HiperZ's IP was retired) per
+  `PACKET_LOSS_FINDINGS.md`. `servers.json` next to the exe replaces the
+  lists entirely; same city/provider/host schema plus optional
+  `max_pps`/`probe_size`/`scrubbed`, validated by `parseServersJSON`.
 - `prefs.go` — pure, unit-tested state logic. Persistence is a *denylist*
   of unchecked server IDs (`disabled_servers`) plus an allowlist of
   expanded tree nodes (`expanded_nodes`). Only IDs present in the active
   server set apply on load; stale IDs (deleted overrides) are ignored and
-  pruned on save. First launch (empty key) = everything checked.
-- `pinger.go` — pro-bing wrapper: fixed pacing constants, jitter =
-  mean |ΔRTT| (RFC 3550), platform fallback logic.
-- `runner.go` — sequential 10s probes, context-cancelled.
-- `main.go` — Fyne UI: region→city→provider tri-state tree (collapsed by
-  default, expansion persisted), Test/Cancel toggle (green/red via
-  Importance), CSV export button, results table with per-cell green/red
-  grading against CS2 HUD thresholds (100ms ping / 10ms jitter / 2% loss)
-  and bold per-city worst-case summary rows. All UI updates from the
-  runner goroutine go through `fyne.Do`.
-- `csv.go` — export with 3-decimal ms precision (UI table shows 1).
+  pruned on save. First launch (empty key) = everything checked. Both
+  lists are saved once from the window `SetCloseIntercept` handler (not
+  per checkbox tap — per-toggle prefs writes made the UI sluggish on
+  slow storage; a crash loses unsaved toggles, accepted tradeoff).
+- `pinger.go` — pro-bing wrapper: per-server pacing (`probePacing`, default
+  64pps/600B, `MaxPPS`/`ProbeSize` overrides), jitter = mean |ΔRTT|
+  (RFC 3550), RTT stats are nearest-rank median/p1/p99 percentiles of the
+  reply samples (avg/min/max proved less informative — one delayed reply
+  skewed a whole row), platform fallback logic.
+- `runner.go` — sequential 10s probes, context-cancelled (flat window even
+  for paced hosts).
+- `results.go` — hierarchical results model (region → city → provider)
+  behind the results table: `addOutcome` appends leaves, `flatten`
+  recomputes worst-case aggregates for region/city rows on every render
+  (bold, ▸/▾ glyph, child count), `worstCase` is the shared column-wise
+  worst merge (error-skip, scrubbed-RTT-only). Tapping a parent row
+  toggles expansion (in-memory only; new runs start with regions
+  expanded and cities collapsed).
+- `main.go` — Fyne UI: region→city→provider tri-state selection tree
+  (collapsed by default, expansion persisted), Test/Cancel toggle
+  (green/red via Importance), CSV export button, results table driven by
+  `resultsTree.flatten()` with per-cell green/red grading against CS2 HUD
+  thresholds (100ms ping / 10ms jitter / 2% loss; RTT columns are
+  median/p1/p99); region/city rows are bold worst-case aggregates
+  (scrubbed providers contribute RTT only — jitter/loss show n/a). The
+  Server column auto-sizes to the widest name cell (`nameColumnWidth` +
+  `rebuildHeader`). Tap a parent row to collapse/expand it. All UI
+  updates from the runner goroutine go through `fyne.Do`.
+- `csv.go` — export with 3-decimal ms precision (UI table shows 1) for the
+  median/p1/p99/jitter columns plus `max_pps`/`probe_size` (0 = default)
+  and a `notes` column (`icmp-scrubbed` for scrubbed rows, whose
+  loss/jitter cells are blank).
+- `identify.go` — "Identify" dialog backend: `parseConnect` is
+  deliberately loose (scans pasted text for `connect <addr>`, any IP
+  token, or a whole-input hostname — port/semicolon/keyword all
+  optional), then exact-IP match against the embedded list (definitive,
+  no network), else RDAP via `rdap.org` (registrant vcard, with a
+  follow-up `entity/ORG-…` lookup for RIPE-style handles) + best-effort
+  PTR. `providerFromRDAP` substring-matches registrant/netname against
+  our Provider labels, longest-needle-first so `dedicatednodes` claims
+  i3D.net before `dedicated` could hit Dedicated.com; unmatched shows
+  raw RDAP evidence. No city mapping (netname stays visible), no ICMP to
+  game hosts (they filter it — see the Hivelocity scrubber note).
 - `smoke_test.go` / tests — network tests skip under `-short`.
 
 ## Domain context

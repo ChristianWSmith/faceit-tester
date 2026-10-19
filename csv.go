@@ -18,7 +18,9 @@ func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcom
 	header := []string{
 		"region", "city", "provider", "host",
 		"sent", "recv", "loss_pct",
-		"avg_ms", "min_ms", "max_ms", "jitter_ms",
+		"median_ms", "p1_ms", "p99_ms", "jitter_ms",
+		"max_pps", "probe_size",
+		"notes",
 		"error",
 	}
 	if err := cw.Write(header); err != nil {
@@ -31,6 +33,15 @@ func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcom
 		if r.Err != nil {
 			errStr = r.Err.Error()
 		}
+		lossStr := fmt.Sprintf("%.2f", r.LossPercent)
+		jitterStr := msPrecise(r.Jitter)
+		notes := ""
+		if o.Server.Scrubbed {
+			// Loss/jitter reflect the DDoS scrubber, not the path.
+			lossStr = ""
+			jitterStr = ""
+			notes = "icmp-scrubbed"
+		}
 		row := []string{
 			regionOf(o.Server),
 			o.Server.City,
@@ -38,11 +49,14 @@ func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcom
 			o.Server.Host,
 			strconv.Itoa(r.Sent),
 			strconv.Itoa(r.Recv),
-			fmt.Sprintf("%.2f", r.LossPercent),
-			msPrecise(r.Avg),
-			msPrecise(r.Min),
-			msPrecise(r.Max),
-			msPrecise(r.Jitter),
+			lossStr,
+			msPrecise(r.Median),
+			msPrecise(r.P1),
+			msPrecise(r.P99),
+			jitterStr,
+			strconv.Itoa(o.Server.MaxPPS),
+			strconv.Itoa(o.Server.ProbeSize),
+			notes,
 			errStr,
 		}
 		if err := cw.Write(row); err != nil {
