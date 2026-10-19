@@ -13,6 +13,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -38,7 +39,9 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             libgl1-mesa-dev \
-            xorg-dev
+            xorg-dev \
+            libwayland-dev \
+            libxkbcommon-dev
 
       - name: Vet and Test (All)
         shell: bash
