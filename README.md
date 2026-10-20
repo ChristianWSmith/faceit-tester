@@ -14,8 +14,9 @@ shape (~64 pps each way, 400–800 byte payloads). Results per server:
 - **Jitter** — mean variation between consecutive RTT samples (RFC 3550 style)
 - **Loss** — round-trip packet loss percentage
 
-Numbers are colored with CS2's telemetry HUD thresholds: green at-or-below
-100ms ping / 10ms jitter / 2% loss, red above.
+Numbers are colored against CS2's telemetry HUD thresholds with a warning
+band below them: green under 70ms ping / 5ms jitter / 1% loss, yellow up
+to 100ms / 10ms / 2%, red above.
 
 The results pane is a tree that mirrors the selection pane: regions start
 expanded, cities start collapsed — tap a row to expand it. Region and city
@@ -76,8 +77,13 @@ sections are saved when you close the app.
 
 ## Custom server lists
 
-Place a `servers.json` next to the executable to replace the built-in lists
-entirely. Same city/provider/host schema, plus optional per-server probe
+The quickest way to customize is **Dump Server Info** (in the actions
+drawer — the up-arrow button next to Test): it saves the currently loaded
+server table, exactly as the app sees it, to a `servers.json` you can edit.
+Change a host, add a server, delete one, and place the file next to the
+executable to replace the built-in lists entirely.
+
+Same city/provider/host schema, plus optional per-server probe
 overrides: `max_pps` (cap the send rate, e.g. under a policer),
 `probe_size` (smaller ICMP payload for providers that filter large echo
 packets), and `scrubbed` (loss/jitter are unmeasurable through a DDoS

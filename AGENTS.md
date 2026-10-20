@@ -99,6 +99,10 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   `PACKET_LOSS_FINDINGS.md`. `servers.json` next to the exe replaces the
   lists entirely; same city/provider/host schema plus optional
   `max_pps`/`probe_size`/`scrubbed`, validated by `parseServersJSON`.
+  `dumpServersJSON` writes the loaded table (embedded or override) back
+  out in the same schema, NA-first region order, for the
+  dump-then-surgically-edit workflow — round-trip tested by
+  `TestDumpServersJSONRoundTrip`.
 - `prefs.go` — pure, unit-tested state logic. Persistence is a *denylist*
   of unchecked server IDs (`disabled_servers`) plus an allowlist of
   expanded tree nodes (`expanded_nodes`). Only IDs present in the active
@@ -123,14 +127,22 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   expanded and cities collapsed).
 - `main.go` — Fyne UI: region→city→provider tri-state selection tree
   (collapsed by default, expansion persisted), Test/Cancel toggle
-  (green/red via Importance), CSV export button, results table driven by
-  `resultsTree.flatten()` with per-cell green/red grading against CS2 HUD
-  thresholds (100ms ping / 10ms jitter / 2% loss; RTT columns are
-  median/p1/p99); region/city rows are bold worst-case aggregates
-  (scrubbed providers contribute RTT only — jitter/loss show n/a). The
-  Server column auto-sizes to the widest name cell (`nameColumnWidth` +
+  (green/red via Importance), results table driven by
+  `resultsTree.flatten()` with per-cell green/yellow/red grading: below
+  the warn thresholds green, at-or-above warn / at-or-below the CS2 HUD
+  thresholds yellow (WarningImportance), strictly above red (ping
+  70/100ms, jitter 5/10ms, loss 1/2%; RTT columns are median/p1/p99);
+  region/city rows are bold worst-case aggregates (scrubbed providers
+  contribute RTT only — jitter/loss show n/a). The Server column
+  auto-sizes to the widest name cell (`nameColumnWidth` +
   `rebuildHeader`). Tap a parent row to collapse/expand it. All UI
   updates from the runner goroutine go through `fyne.Do`.
+- Secondary actions (Export CSV, Dump Server Info, Identify) live in a
+  floating drawer above the button row: `widget.NewStack(main, drawerLayer)`
+  where the drawer is a tap-catcher + right-aligned vertical button column
+  on an overlay-colored backdrop panel. The arrow button toggles it and
+  flips icon direction; every close path goes through `hideDrawer` so the
+  icon can't desync from visibility. Built in `content()`, not `build()`.
 - `csv.go` — export with 3-decimal ms precision (UI table shows 1) for the
   median/p1/p99/jitter columns plus `max_pps`/`probe_size` (0 = default)
   and a `notes` column (`icmp-scrubbed` for scrubbed rows, whose
@@ -147,6 +159,21 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   raw RDAP evidence. No city mapping (netname stays visible), no ICMP to
   game hosts (they filter it — see the Hivelocity scrubber note).
 - `smoke_test.go` / tests — network tests skip under `-short`.
+
+## Updating the server list
+
+`.opencode/skills/update-servers/SKILL.md` documents the full workflow:
+the user supplies the official HiperZ connection-test zips
+(`hiperz_test_*.zip`, gitignored — downloaded manually from
+hiperz.com, which 403s scripted fetches) plus the current FACEIT
+region/city list; the skill parses the `.bat` scripts, maps HiperZ city
+labels to FACEIT names, RDAP-resolves providers, rate/size-matrix-probes
+new and changed hosts (dead / policer / size-filter / scrubbed), and
+updates `embeddedServers` plus the tests that pin it
+(`TestServerListMatchesFindings`, total-count in
+`TestEmbeddedServersCoverAllRegions`). Codenames in the scripts are
+unreliable (`GSL` = 3 companies; `hz` = 3 companies) — RDAP decides
+Provider labels via `providerKeys` in `identify.go`.
 
 ## Domain context
 
