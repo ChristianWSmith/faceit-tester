@@ -13,7 +13,14 @@ go vet ./...
 go test -short ./...    # -short skips network smoke tests (what CI runs)
 go test ./...           # includes live pings (1.1.1.1, paced OVH UK, NFO 56B)
 go build
+go build -ldflags "-H windowsgui"   # Windows: GUI subsystem, no console
 ```
+
+Plain Windows `go build` produces a console-subsystem exe; the Restart
+as Admin relaunch can't inherit the terminal, so a blank console window
+appears — always test elevation flows with `-H windowsgui` (what
+`fyne package` produces anyway). Windows needs a C compiler (mingw) for
+Fyne's cgo.
 
 No linter/formatter beyond `gofmt` + `go vet`. CI (`.github/workflows/ci.yml`)
 packages ubuntu/windows/macos with `fyne package -release` (needs
@@ -60,7 +67,13 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   `syncing` bool guard so cascades don't re-enter.
 - **Windows requires admin** (raw ICMP via pro-bing `SetPrivileged(true)`).
   Elevation check is build-tagged (`admin_windows.go`/`admin_other.go`);
-  Test button is disabled with a message when not elevated. Linux tries
+  Test button is *hidden* when not elevated — a yellow **Restart as Admin**
+  button takes its place — relaunch is `ShellExecuteW` `runas`
+  on the current exe (`elevateAndRestart`, with an `errElevationCancelled`
+  sentinel compared via `errors.Is` from cross-platform code); prefs are
+  saved manually before relaunch because `SetCloseIntercept` timing can't
+  be relied on. The exe must stay `asInvoker` — a `requireAdministrator`
+  manifest would force UAC at every launch. Linux tries
   unprivileged udp4 sockets, falls back to raw on permission errors
   (`isPermissionErr` matches several platform-specific strings).
 - **Per-server ICMP policers exist; measure them with rate curves.** Some

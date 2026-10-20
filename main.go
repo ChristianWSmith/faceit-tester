@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"image/color"
 	"strings"
@@ -65,6 +66,7 @@ type ui struct {
 
 	checksScroll *container.Scroll
 	testBtn      *widget.Button
+	restartBtn   *widget.Button
 	exportBtn    *widget.Button
 	dumpBtn      *widget.Button
 	identifyBtn  *widget.Button
@@ -188,9 +190,19 @@ func (u *ui) build() {
 	// (see onDrawerTap); the arrow flips to point down while it is open.
 	u.drawerBtn = widget.NewButtonWithIcon("", theme.MoveUpIcon(), u.onDrawerTap)
 
+	// Restart as Admin relaunches this exe elevated via the UAC runas verb
+	// (see onRestartTap); only shown when testing is blocked by a missing
+	// elevation token, so the button collapses when elevated.
+	u.restartBtn = widget.NewButton("Restart as Admin", u.onRestartTap)
+	u.restartBtn.Importance = widget.WarningImportance // yellow = needs attention
+
 	if !isElevated() {
-		u.testBtn.Disable()
-		u.statusLabel.SetText("Run this application as administrator to test (required on Windows).")
+		// Test is pointless without elevation — Restart as Admin takes
+		// its place in the button row (hidden buttons collapse in HBox).
+		u.testBtn.Hide()
+		u.statusLabel.SetText("Testing needs administrator rights on Windows — use Restart as Admin.")
+	} else {
+		u.restartBtn.Hide()
 	}
 }
 
@@ -216,7 +228,7 @@ func (u *ui) content() fyne.CanvasObject {
 	// the arrow button rather than taking inline space — the bottom-right
 	// corner was getting crowded.
 	bottom := container.NewBorder(nil, nil, nil,
-		container.NewHBox(u.drawerBtn, u.testBtn), u.statusLabel)
+		container.NewHBox(u.drawerBtn, u.restartBtn, u.testBtn), u.statusLabel)
 	main := container.NewBorder(nil, bottom, nil, nil, split)
 
 	// Floating drawer: a transparent catcher behind the action column
@@ -586,6 +598,36 @@ func (u *ui) onTestTap() {
 			u.cancel = nil
 		})
 	}()
+}
+
+// onRestartTap confirms, then relaunches this exe elevated via the UAC
+// runas verb and closes the unelevated instance. Cancel keeps the old
+// instance running — everything except Test works without elevation.
+func (u *ui) onRestartTap() {
+	d := dialog.NewConfirm("Restart as administrator",
+		"Testing sends raw ICMP sockets, which require admin on Windows.\n\n"+
+			"Windows will ask you to approve the restart. Your current selections "+
+			"are saved first.",
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			// Prefs are otherwise only saved from SetCloseIntercept; save
+			// explicitly so the elevated relaunch restores current state.
+			u.saveAllPrefs()
+			if err := elevateAndRestart(); err != nil {
+				if errors.Is(err, errElevationCancelled) {
+					u.statusLabel.SetText("Elevation cancelled — Restart as Admin to enable testing.")
+				} else {
+					u.statusLabel.SetText("Restart failed: " + err.Error())
+				}
+				return
+			}
+			// New elevated instance is starting; close this one. The
+			// SetCloseIntercept runs saveAllPrefs again (harmless).
+			u.window.Close()
+		}, u.window)
+	d.Show()
 }
 
 func (u *ui) onExportTap() {

@@ -99,8 +99,20 @@ scrubber — report ping only):
 
 ## Platform notes
 
-- **Windows:** requires running as administrator (raw ICMP sockets). The app
-  will refuse to start tests otherwise.
+- **Windows:** requires administrator rights (raw ICMP sockets). If you
+  launched without them, use **Restart as Admin** next to the Test button —
+  Windows shows a UAC prompt and relaunches the app elevated; your
+  selections are saved first.
+
+  The first run of a downloaded exe may also show "Windows protected your
+  PC" (SmartScreen). The build is unsigned — click **More info → Run
+  anyway**, or clear the mark before the first run:
+
+      Unblock-File .\faceit-tester-windows-amd64.exe
+
+  (Smart App Control — on by default on some Windows 11 installs — can
+  block unsigned apps with no "Run anyway" option. If the exe won't start
+  at all, check Windows Security → App & browser control.)
 - **Linux:** works unprivileged when the kernel allows it
   (`net.ipv4.ping_group_range`). Otherwise run with
   `sudo setcap cap_net_raw=+ep ./faceit-tester` or as root.
@@ -110,6 +122,15 @@ scrubber — report ping only):
 
 ```sh
 go build
+```
+
+On Windows, build with the GUI subsystem flag so no console window
+appears (including on the Restart as Admin relaunch — the elevated
+instance can't inherit your terminal, so a console-subsystem exe would
+open a blank one):
+
+```sh
+go build -ldflags "-H windowsgui"
 ```
 
 For distributable builds with the app icon embedded (Windows exe icon,
