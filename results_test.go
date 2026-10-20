@@ -39,13 +39,13 @@ func TestWorstCase(t *testing.T) {
 			t.Errorf("worst cell %d text = %q, want %q", i+1, row[i+1].text, want)
 		}
 	}
-	// Graded normally: 55ms ok, 12ms jitter over, 6.25% loss over.
+	// Graded normally: 55ms ok, 90ms warn, 12ms jitter over, 6.25% loss over.
 	wantImps := []widget.Importance{
 		widget.SuccessImportance,
 		widget.SuccessImportance,
-		widget.SuccessImportance,
-		widget.DangerImportance, // jitter 12 > 10
-		widget.DangerImportance, // loss 6.25 > 2
+		widget.WarningImportance, // p99 90 in [70, 100]
+		widget.DangerImportance,  // jitter 12 > 10
+		widget.DangerImportance,  // loss 6.25 > 2
 	}
 	for i, want := range wantImps {
 		if row[i+1].imp != want {

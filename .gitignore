@@ -4,11 +4,17 @@
 # Binaries for programs and plugins
 faceit-tester
 *.csv
+*.json
+*.zip
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# HiperZ connection-test zips, extracted scripts, and their outputs
+hiperz_test*
+__MACOSX/
 
 # Test binary, built with `go test -c`
 *.test
@@ -36,4 +42,5 @@ go.work.sum
 
 # Session working notes (untracked reference)
 PACKET_LOSS_FINDINGS.md
-.opencode/
+.opencode/*
+!.opencode/skills/

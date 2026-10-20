@@ -37,7 +37,7 @@ func TestOutcomeRowGrading(t *testing.T) {
 	for i, want := range []widget.Importance{
 		widget.MediumImportance,
 		widget.DangerImportance,  // median 120 > 100
-		widget.SuccessImportance, // p1 90 ≤ 100
+		widget.WarningImportance, // p1 90 in [70, 100]
 		widget.DangerImportance,  // p99 200 > 100
 		widget.DangerImportance,  // jitter 15 > 10
 		widget.DangerImportance,  // loss 37.5 > 2
@@ -47,7 +47,8 @@ func TestOutcomeRowGrading(t *testing.T) {
 		}
 	}
 
-	// Boundary: exactly at threshold is green ("at-or-below").
+	// Boundary: exactly at red threshold is yellow ("strictly above" = red);
+	// exactly at warn threshold is yellow too ("at-or-above warn").
 	at := PingResult{
 		Sent: 640, Recv: 628, LossPercent: 2.0,
 		Median: 100 * time.Millisecond, P1: 100 * time.Millisecond,
@@ -55,12 +56,32 @@ func TestOutcomeRowGrading(t *testing.T) {
 	}
 	row = outcomeRow(ServerOutcome{Server: srv("X", "y", "9.9.9.9"), Result: at})
 	for i := 1; i <= 4; i++ {
-		if row[i].imp != widget.SuccessImportance {
-			t.Errorf("at-threshold cell %d imp = %v, want Success", i, row[i].imp)
+		if row[i].imp != widget.WarningImportance {
+			t.Errorf("at-threshold cell %d imp = %v, want Warning", i, row[i].imp)
 		}
 	}
-	if row[5].imp != widget.SuccessImportance {
-		t.Errorf("loss 2.0%% imp = %v, want Success (at threshold)", row[5].imp)
+	if row[5].imp != widget.WarningImportance {
+		t.Errorf("loss 2.0%% imp = %v, want Warning (at threshold)", row[5].imp)
+	}
+
+	// Just under the warn thresholds is green; just under red is yellow.
+	warnEdge := PingResult{
+		Sent: 640, Recv: 634, LossPercent: 1.0,
+		Median: 70 * time.Millisecond, P1: 69 * time.Millisecond,
+		P99: 99 * time.Millisecond, Jitter: 5 * time.Millisecond,
+	}
+	row = outcomeRow(ServerOutcome{Server: srv("X", "y", "9.9.9.9"), Result: warnEdge})
+	for i, want := range []widget.Importance{
+		widget.MediumImportance,
+		widget.WarningImportance, // median 70 ≥ 70
+		widget.SuccessImportance, // p1 69 < 70
+		widget.WarningImportance, // p99 99 in [70, 100]
+		widget.WarningImportance, // jitter 5 ≥ 5
+		widget.WarningImportance, // loss 1.0 ≥ 1
+	} {
+		if row[i].imp != want {
+			t.Errorf("warn-edge cell %d imp = %v, want %v", i, row[i].imp, want)
+		}
 	}
 
 	// Zero replies: RTT cells uncolored, loss grades (100% → red).

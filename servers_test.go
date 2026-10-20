@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -271,5 +274,49 @@ func TestParseServersJSONParity(t *testing.T) {
 		if _, err := parseServersJSON([]byte(doc)); err == nil {
 			t.Errorf("parseServersJSON(%s) succeeded, want error", doc)
 		}
+	}
+}
+
+func TestDumpServersJSONRoundTrip(t *testing.T) {
+	// The dump must be loadable by parseServersJSON (full override parity)
+	// and losslessly reproduce the source table.
+	var buf bytes.Buffer
+	if err := dumpServersJSON(&buf, embeddedServers); err != nil {
+		t.Fatalf("dumpServersJSON: %v", err)
+	}
+	got, err := parseServersJSON(buf.Bytes())
+	if err != nil {
+		t.Fatalf("parseServersJSON(dumped): %v\n%s", err, buf.String())
+	}
+	if len(got) != len(embeddedServers) {
+		t.Fatalf("got %d regions, want %d", len(got), len(embeddedServers))
+	}
+	for region, want := range embeddedServers {
+		if !reflect.DeepEqual(got[region], want) {
+			t.Errorf("region %s mismatch:\n got %+v\nwant %+v", region, got[region], want)
+		}
+	}
+
+	// Region order: RegionOrder first (NA before EU in the raw text).
+	text := buf.String()
+	if strings.Index(text, `"NA"`) > strings.Index(text, `"EU"`) {
+		t.Error("dumped region order should list NA before EU")
+	}
+
+	// A dumped file with one surgical edit still loads (the primary
+	// dump-and-edit workflow).
+	edited := strings.Replace(text, "167.160.91.2", "10.0.0.9", 1)
+	servers, err := parseServersJSON([]byte(edited))
+	if err != nil {
+		t.Fatalf("parseServersJSON(edited): %v", err)
+	}
+	var found bool
+	for _, s := range servers["NA"] {
+		if s.City == "San Jose" && s.Provider == "Dedicated.com" {
+			found = s.Host == "10.0.0.9"
+		}
+	}
+	if !found {
+		t.Error("surgical host edit not reflected after reload")
 	}
 }

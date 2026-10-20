@@ -4,12 +4,14 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"image/color"
 	"strings"
 	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
@@ -23,11 +25,16 @@ var iconData []byte
 const appID = "com.christianws.faceit-tester"
 
 // CS2 telemetry HUD default thresholds. Values strictly above these render
-// red; at-or-below render green.
+// red; at-or-above the warn thresholds render yellow (WarningImportance);
+// below the warn thresholds render green.
 const (
 	pingThreshold   = 100 * time.Millisecond
 	jitterThreshold = 10 * time.Millisecond
 	lossThreshold   = 2.0 // percent
+
+	pingWarnThreshold   = 70 * time.Millisecond
+	jitterWarnThreshold = 5 * time.Millisecond
+	lossWarnThreshold   = 1.0 // percent
 )
 
 // tableCell is one results-table cell: display text plus the label
@@ -59,7 +66,10 @@ type ui struct {
 	checksScroll *container.Scroll
 	testBtn      *widget.Button
 	exportBtn    *widget.Button
+	dumpBtn      *widget.Button
 	identifyBtn  *widget.Button
+	drawerBtn    *widget.Button  // toggles the secondary-actions drawer
+	drawerLayer  *fyne.Container // floating drawer: catcher + action column
 	statusLabel  *widget.Label
 	table        *widget.Table
 	headerRow    *fyne.Container // results column headers; col 0 width tracks content
@@ -167,7 +177,16 @@ func (u *ui) build() {
 	u.exportBtn = widget.NewButtonWithIcon("Export CSV", theme.DocumentSaveIcon(), u.onExportTap)
 	u.exportBtn.Disable()
 
+	// Dumps the loaded server table (embedded or override) as servers.json
+	// so users can make surgical edits instead of hand-writing the whole
+	// file from scratch.
+	u.dumpBtn = widget.NewButtonWithIcon("Dump Server Info", theme.DocumentCreateIcon(), u.onDumpTap)
+
 	u.identifyBtn = widget.NewButtonWithIcon("Identify", theme.SearchIcon(), u.onIdentifyTap)
+
+	// Secondary actions live in a floating drawer above the arrow button
+	// (see onDrawerTap); the arrow flips to point down while it is open.
+	u.drawerBtn = widget.NewButtonWithIcon("", theme.MoveUpIcon(), u.onDrawerTap)
 
 	if !isElevated() {
 		u.testBtn.Disable()
@@ -191,12 +210,55 @@ func (u *ui) content() fyne.CanvasObject {
 	split := container.NewHSplit(container.NewPadded(u.checksScroll), tableArea)
 	split.Offset = 0.35
 
-	// Status fills the left (room for long progress messages); actions
-	// cluster right with the primary Test/Cancel toggle anchored last.
+	// Status fills the center (room for long progress messages); actions
+	// sit in the right slot so label and buttons share one vertical band.
+	// Secondary actions (export/dump/identify) float in a drawer above
+	// the arrow button rather than taking inline space — the bottom-right
+	// corner was getting crowded.
 	bottom := container.NewBorder(nil, nil, nil,
-		container.NewHBox(u.exportBtn, u.identifyBtn, u.testBtn), u.statusLabel)
+		container.NewHBox(u.drawerBtn, u.testBtn), u.statusLabel)
+	main := container.NewBorder(nil, bottom, nil, nil, split)
 
-	return container.NewBorder(nil, bottom, nil, nil, split)
+	// Floating drawer: a transparent catcher behind the action column
+	// dismisses the drawer on any tap outside the buttons (the tap search
+	// skips non-tappable subtrees, so the column's empty areas fall
+	// through to the catcher). The column stacks vertically, bottom-aligned
+	// and right-aligned, raised above the control row by a gap sized to it.
+	// The buttons sit on an overlay-colored backdrop (the same fill theme
+	// uses for popups) so the drawer reads as a container, not loose
+	// floating controls.
+	catcher := newTapCatcher(u.hideDrawer)
+	actions := container.NewPadded(container.NewVBox(u.exportBtn, u.dumpBtn, u.identifyBtn))
+	backdrop := canvas.NewRectangle(theme.Color(theme.ColorNameOverlayBackground))
+	backdrop.CornerRadius = theme.Size(theme.SizeNamePopupRadius)
+	panel := container.NewStack(backdrop, actions)
+	rightCol := container.NewBorder(nil, panel, nil, nil, nil)
+	gap := container.NewGridWrap(
+		fyne.NewSize(1, u.drawerBtn.MinSize().Height+2*theme.Padding()),
+		widget.NewLabel(""))
+	cluster := container.NewBorder(nil, gap, nil, rightCol, nil)
+	u.drawerLayer = container.NewStack(catcher, cluster)
+	u.drawerLayer.Hide()
+
+	return container.NewStack(main, u.drawerLayer)
+}
+
+// onDrawerTap toggles the secondary-actions drawer. The arrow icon points
+// the way the drawer will move: up to open, down while open. Dismissal
+// always goes through hideDrawer (the catcher taps it directly), so the
+// icon can never get out of sync with the drawer's actual visibility.
+func (u *ui) onDrawerTap() {
+	if u.drawerLayer.Visible() {
+		u.hideDrawer()
+		return
+	}
+	u.drawerLayer.Show()
+	u.drawerBtn.SetIcon(theme.MoveDownIcon())
+}
+
+func (u *ui) hideDrawer() {
+	u.drawerLayer.Hide()
+	u.drawerBtn.SetIcon(theme.MoveUpIcon())
 }
 
 const (
@@ -551,6 +613,31 @@ func (u *ui) onExportTap() {
 	d.Show()
 }
 
+// onDumpTap writes the loaded server table (embedded or override) to a
+// user-chosen servers.json. The file replaces the lists entirely on next
+// launch, so the dumped copy is meant as a starting point for surgical
+// edits (e.g. one provider's host changed) rather than a from-scratch
+// rewrite.
+func (u *ui) onDumpTap() {
+	d := dialog.NewFileSave(func(closer fyne.URIWriteCloser, err error) {
+		if err != nil {
+			u.statusLabel.SetText("Dump failed: " + err.Error())
+			return
+		}
+		if closer == nil {
+			return // user cancelled
+		}
+		defer closer.Close()
+		if writeErr := dumpServersJSON(closer, u.servers); writeErr != nil {
+			u.statusLabel.SetText("Dump failed: " + writeErr.Error())
+			return
+		}
+		u.statusLabel.SetText("Dumped server list to JSON (servers.json next to the exe overrides the built-ins).")
+	}, u.window)
+	d.SetFileName("servers.json")
+	d.Show()
+}
+
 func (u *ui) setRunning(running bool) {
 	u.running = running
 	if running {
@@ -592,7 +679,8 @@ func outcomeRow(outcome ServerOutcome) []tableCell {
 }
 
 // resultRow renders one results-table row, coloring numeric cells green
-// (SuccessImportance) at-or-below the CS2 HUD thresholds and red
+// (SuccessImportance) below the warn thresholds, yellow (WarningImportance)
+// at-or-above warn / at-or-below the CS2 HUD thresholds, and red
 // (DangerImportance) above them. With no received replies there is nothing
 // to grade, so RTT cells stay uncolored; loss still grades (0-of-640 is
 // a meaningful 100%). Scrubbed endpoints cannot report loss or jitter
@@ -611,7 +699,7 @@ func resultRow(name string, r PingResult, scrubbed bool) []tableCell {
 		}
 	}
 	rttOK := r.Recv > 0
-	jitterCell := tableCell{formatMS(r.Jitter), gradeMS(r.Jitter, jitterThreshold, rttOK), false}
+	jitterCell := tableCell{formatMS(r.Jitter), gradeMS(r.Jitter, jitterThreshold, jitterWarnThreshold, rttOK), false}
 	lossCell := tableCell{fmt.Sprintf("%.2f%%", r.LossPercent), gradePct(r.LossPercent), false}
 	if scrubbed {
 		jitterCell = tableCell{"n/a", widget.MediumImportance, false}
@@ -619,22 +707,25 @@ func resultRow(name string, r PingResult, scrubbed bool) []tableCell {
 	}
 	return []tableCell{
 		nameCell,
-		{formatMS(r.Median), gradeMS(r.Median, pingThreshold, rttOK), false},
-		{formatMS(r.P1), gradeMS(r.P1, pingThreshold, rttOK), false},
-		{formatMS(r.P99), gradeMS(r.P99, pingThreshold, rttOK), false},
+		{formatMS(r.Median), gradeMS(r.Median, pingThreshold, pingWarnThreshold, rttOK), false},
+		{formatMS(r.P1), gradeMS(r.P1, pingThreshold, pingWarnThreshold, rttOK), false},
+		{formatMS(r.P99), gradeMS(r.P99, pingThreshold, pingWarnThreshold, rttOK), false},
 		jitterCell,
 		lossCell,
 	}
 }
 
-// gradeMS returns SuccessImportance at-or-below threshold and
-// DangerImportance above; ungraded (Medium) when hasSamples is false.
-func gradeMS(d, threshold time.Duration, hasSamples bool) widget.Importance {
+// gradeMS returns DangerImportance strictly above threshold, WarningImportance
+// at-or-above warn; ungraded (Medium) when hasSamples is false.
+func gradeMS(d, threshold, warn time.Duration, hasSamples bool) widget.Importance {
 	if !hasSamples {
 		return widget.MediumImportance
 	}
 	if d > threshold {
 		return widget.DangerImportance
+	}
+	if d >= warn {
+		return widget.WarningImportance
 	}
 	return widget.SuccessImportance
 }
@@ -642,6 +733,9 @@ func gradeMS(d, threshold time.Duration, hasSamples bool) widget.Importance {
 func gradePct(p float64) widget.Importance {
 	if p > lossThreshold {
 		return widget.DangerImportance
+	}
+	if p >= lossWarnThreshold {
+		return widget.WarningImportance
 	}
 	return widget.SuccessImportance
 }
@@ -798,3 +892,25 @@ func orDash(s string) string {
 	}
 	return s
 }
+
+// tapCatcher is a transparent widget that runs onTap when tapped. It backs
+// the floating action drawer: the tap search skips non-tappable subtrees,
+// so any tap that misses the drawer's buttons lands here and dismisses it.
+type tapCatcher struct {
+	widget.BaseWidget
+	onTap func()
+}
+
+func newTapCatcher(onTap func()) *tapCatcher {
+	t := &tapCatcher{onTap: onTap}
+	t.ExtendBaseWidget(t)
+	return t
+}
+
+func (t *tapCatcher) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
+
+func (t *tapCatcher) Tapped(*fyne.PointEvent) { t.onTap() }
+
+func (t *tapCatcher) TappedSecondary(*fyne.PointEvent) { t.onTap() }

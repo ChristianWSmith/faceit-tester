@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -260,4 +261,36 @@ func regionNames(servers map[string][]Server) []string {
 	}
 	sort.Strings(extra)
 	return append(names, extra...)
+}
+
+// dumpServersJSON writes servers in the same shape parseServersJSON accepts,
+// so the output can be saved as servers.json and reloaded as a full override.
+// Regions are ordered RegionOrder-first (extras sorted) to match the embedded
+// table layout; entries keep their in-list order. Intended for the
+// dump-then-surgically-edit workflow: dumping rather than hand-writing the
+// file avoids recreating the whole table when one server changes.
+func dumpServersJSON(w io.Writer, servers map[string][]Server) error {
+	if _, err := io.WriteString(w, "{\n"); err != nil {
+		return err
+	}
+	for i, region := range regionNames(servers) {
+		name, err := json.Marshal(region)
+		if err != nil {
+			return err
+		}
+		list, err := json.MarshalIndent(servers[region], "  ", "  ")
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			if _, err := io.WriteString(w, ",\n"); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(w, "  %s: %s", name, list); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "\n}\n")
+	return err
 }
