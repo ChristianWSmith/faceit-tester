@@ -66,16 +66,31 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   `SetChecked` clears Partial and fires OnChanged. Bulk updates use a
   `syncing` bool guard so cascades don't re-enter.
 - **Windows requires admin** (raw ICMP via pro-bing `SetPrivileged(true)`).
-  Elevation check is build-tagged (`admin_windows.go`/`admin_other.go`);
-  Test button is *hidden* when not elevated — a yellow **Restart as Admin**
-  button takes its place — relaunch is `ShellExecuteW` `runas`
-  on the current exe (`elevateAndRestart`, with an `errElevationCancelled`
-  sentinel compared via `errors.Is` from cross-platform code); prefs are
-  saved manually before relaunch because `SetCloseIntercept` timing can't
-  be relied on. The exe must stay `asInvoker` — a `requireAdministrator`
+  Elevation check is build-tagged (`admin_windows.go`/`admin_other.go`) and
+  is the *first* thing `main()` does, before any Fyne init: every launch
+  goes straight to the UAC prompt (`ShellExecuteW` `runas` via
+  `elevateAndRestart`, which forwards `os.Args[1:]` quoted by
+  `joinWinArgs` so flags survive the round-trip). The unelevated GUI
+  (Test hidden + yellow **Restart as Admin** explaining and retrying) is
+  only the fallback after a dismissed prompt (`errElevationCancelled`
+  sentinel compared via `errors.Is` from cross-platform code); the manual
+  restart saves prefs first because `SetCloseIntercept` timing can't be
+  relied on. The exe must stay `asInvoker` — a `requireAdministrator`
   manifest would force UAC at every launch. Linux tries
   unprivileged udp4 sockets, falls back to raw on permission errors
   (`isPermissionErr` matches several platform-specific strings).
+- **`--test` auto-start** (`autotest.go`): `flag.Parse` runs *before* the
+  elevation check so `--help` never triggers UAC, and the spec is
+  validated *before* the UAC prompt so a bad spec fails fast on the
+  terminal — errors print to stderr *and* show in the status label (the
+  packaged exe is windowsgui: stderr writes are silent no-ops there).
+  The spec replaces `u.state` and adds ancestors to `u.expanded`
+  *before* `build()`. Auto-start is a goroutine launched *before*
+  `ShowAndRun` that sleeps ~100ms then calls `fyne.Do(onTestTap)` —
+  `fyne.Do` must not run before the event loop exists, and there is no
+  after-first-render hook in Fyne to use instead. Skipped when unelevated
+  or the spec is invalid; the selection persists on close like any manual
+  change.
 - **Per-server ICMP policers exist; measure them with rate curves.** Some
   providers (OVH fleet, Moscow PS, BA Latitude.sh) answer ICMP
   at a fixed token quota regardless of send rate — a *limiter* keeps the
@@ -171,6 +186,14 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   i3D.net before `dedicated` could hit Dedicated.com; unmatched shows
   raw RDAP evidence. No city mapping (netname stays visible), no ICMP to
   game hosts (they filter it — see the Hivelocity scrubber note).
+- `autotest.go` — CLI backend, no Fyne imports (unit-testable):
+  `parseTestSpec` resolves the `--test` JSON grammar (region → city →
+  provider, `all` reserved at every level, case-insensitive name matching,
+  errors on unknown names or empty selections) into the same
+  server-ID → checked map `stateFromDisabled` produces; `expansionForSelection`
+  derives tree-node keys to expand so the selection is visible;
+  `quoteWinArg`/`joinWinArgs` render Windows parameter strings for
+  `elevateAndRestart`'s arg forwarding (CommandLineToArgvW quoting rules).
 - `smoke_test.go` / tests — network tests skip under `-short`.
 
 ## Updating the server list

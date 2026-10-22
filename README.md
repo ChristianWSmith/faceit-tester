@@ -99,10 +99,12 @@ scrubber — report ping only):
 
 ## Platform notes
 
-- **Windows:** requires administrator rights (raw ICMP sockets). If you
-  launched without them, use **Restart as Admin** next to the Test button —
-  Windows shows a UAC prompt and relaunches the app elevated; your
-  selections are saved first.
+- **Windows:** requires administrator rights (raw ICMP sockets). On launch
+  the app immediately requests elevation (UAC prompt) and relaunches itself
+  elevated — you never see an unelevated main window. If you dismiss the
+  prompt, the app opens unelevated with Test disabled and a **Restart as
+  Admin** button (which explains why elevation is needed, saves your
+  selections, and retries) to go through the flow again.
 
   The first run of a downloaded exe may also show "Windows protected your
   PC" (SmartScreen). The build is unsigned — click **More info → Run
@@ -117,6 +119,44 @@ scrubber — report ping only):
   (`net.ipv4.ping_group_range`). Otherwise run with
   `sudo setcap cap_net_raw=+ep ./faceit-tester` or as root.
 - **macOS:** works unprivileged.
+
+## Command-line options
+
+`--help` prints usage and the `--test` grammar below.
+
+`--test <spec>` selects servers with a JSON object (region → city →
+provider) and starts the test automatically once the window is ready:
+
+```sh
+faceit-tester --test '{"NA":"all"}'                          # entire NA region
+faceit-tester --test '{"NA":{"Virginia":"all"}}'             # one city
+faceit-tester --test '{"NA":{"Virginia":"OVH"}}'             # one provider
+faceit-tester --test '{"NA":{"Virginia":["OVH","Datacamp"]}}' # provider list
+faceit-tester --test '{"NA":"all","EU":{"Germany":"all"}}'   # multiple regions
+faceit-tester --test '{"all":"all"}'                         # every server
+```
+
+Names match case-insensitively; `all` is reserved at every level; unknown
+region/city/provider names are errors (printed to the terminal when one
+is attached, and shown in the app's status bar). The spec is validated
+before the UAC prompt, so a bad spec fails fast without an elevation
+round-trip. The spec's selection replaces the checkbox state and — like
+manual selections — is saved when you close the app. The window stays
+open on the results when the run finishes.
+
+On Windows the flag survives the elevation relaunch: launch with `--test`,
+approve UAC, and the test starts in the elevated instance. In PowerShell,
+wrap the spec in single quotes so the inner double quotes survive:
+
+```powershell
+.\faceit-tester.exe --test '{"NA":"all"}'
+```
+
+Note: the packaged Windows exe is built with `-H windowsgui` (no console),
+so terminal output — `--help`, flag errors, and invalid `--test` spec
+errors — is lost there (invalid specs still appear in the app's status
+bar). Run a plain `go build` console binary if you need the messages on
+a terminal.
 
 ## Building
 

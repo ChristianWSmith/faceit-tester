@@ -4,8 +4,10 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"flag"
 	"fmt"
 	"image/color"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -100,12 +102,73 @@ type ui struct {
 }
 
 func main() {
+	// Help output goes to stdout so console sessions can read it; the
+	// packaged windowsgui exe has no console, so --help exits silently
+	// there (README carries the same reference). Parsed before the
+	// elevation check so --help never triggers a UAC prompt.
+	flag.CommandLine.SetOutput(os.Stdout)
+	testSpec := flag.String("test", "", `auto-start a test: JSON spec of regions/cities/providers, e.g. {"NA":"all"}`)
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "FACEIT Connection Tester — pre-flight ICMP connection tester for FACEIT CS2 locations.\n\n")
+		fmt.Fprintf(out, "Usage:\n  faceit-tester [flags]\n\nFlags:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(out, `
+--test selects servers with a JSON object of region → city → provider:
+  {"NA":"all"}                               entire NA region
+  {"NA":{"Virginia":"all"}}                  one city
+  {"NA":{"Virginia":"OVH"}}                  one provider
+  {"NA":{"Virginia":["OVH","Datacamp"]}}     provider list
+  {"NA":"all","EU":{"Germany":"all"}}        multiple regions
+  {"all":"all"}                              every server in every region
+
+Names match case-insensitively; "all" is reserved at every level. The
+selection replaces the checkbox state and is saved on exit. On Windows
+the app requests administrator rights on launch; a --test flag survives
+the elevated relaunch and starts automatically once the window is up.
+`)
+	}
+	flag.Parse()
+
+	// Validate --test before the elevation prompt so a bad spec fails
+	// fast on the terminal instead of after a pointless UAC round-trip.
+	// Errors also reach the status label once the window is up (stderr
+	// writes are silent no-ops in the windowsgui build, which has no
+	// console handles).
+	servers := loadServers()
+	var (
+		specErr error
+		sel     map[string]bool
+	)
+	if *testSpec != "" {
+		var err error
+		if sel, err = parseTestSpec(servers, *testSpec); err != nil {
+			specErr = err
+			fmt.Fprintln(os.Stderr, "Invalid --test spec:", err)
+		}
+	}
+
+	// Request elevation before any window exists: a launch goes straight
+	// to the UAC prompt, and the relaunched process re-parses the
+	// forwarded argv so --test runs elevated automatically. A dismissed
+	// prompt falls through to the unelevated GUI, where Restart as Admin
+	// explains and retries.
+	if !isElevated() {
+		switch err := elevateAndRestart(); {
+		case err == nil:
+			os.Exit(0)
+		case errors.Is(err, errElevationCancelled):
+			fmt.Fprintln(os.Stderr, "Elevation cancelled — running unelevated.")
+		default:
+			fmt.Fprintln(os.Stderr, "Elevation failed:", err)
+		}
+	}
+
 	a := app.NewWithID(appID)
 	a.SetIcon(fyne.NewStaticResource("icon.png", iconData))
 	w := a.NewWindow("FACEIT Connection Tester")
 	w.Resize(fyne.NewSize(960, 600))
 
-	servers := loadServers()
 	prefs := a.Preferences()
 	regionBy := map[string]string{}
 	for region, srvs := range servers {
@@ -113,16 +176,37 @@ func main() {
 			regionBy[s.ID()] = region
 		}
 	}
+	state := stateFromDisabled(servers, prefs.StringList(prefsDisabledKey))
+	expanded := expandedFromList(servers, prefs.StringList(prefsExpandedKey))
+	if specErr == nil && sel != nil {
+		// A valid --test spec replaces the restored selection entirely
+		// (persisted on exit like any manual change) and expands the
+		// ancestors of the selected servers so the tree shows what runs.
+		state = sel
+		for key := range expansionForSelection(servers, sel) {
+			expanded[key] = true
+		}
+	}
 	u := &ui{
 		window:   w,
 		prefs:    prefs,
 		servers:  servers,
 		regionBy: regionBy,
-		state:    stateFromDisabled(servers, prefs.StringList(prefsDisabledKey)),
-		expanded: expandedFromList(servers, prefs.StringList(prefsExpandedKey)),
+		state:    state,
+		expanded: expanded,
 		tree:     newResultsTree(),
 	}
 	u.build()
+	if *testSpec != "" {
+		switch {
+		case specErr != nil:
+			u.statusLabel.SetText("Invalid --test spec: " + specErr.Error())
+		case !isElevated():
+			// build() already hid Test; say the queued spec will run
+			// after the user restarts elevated.
+			u.statusLabel.SetText("Testing needs administrator rights — Restart as Admin will run the queued test automatically.")
+		}
+	}
 	w.SetContent(u.content())
 	// Persist selection + expansion once on exit: writing prefs on every
 	// checkbox tap made the UI feel sluggish on slow storage.
@@ -130,6 +214,15 @@ func main() {
 		u.saveAllPrefs()
 		w.Close()
 	})
+	// Auto-start once the event loop is running: fyne.Do queues onto the
+	// UI thread, and the short delay lets the first frame render. Skipped
+	// when unelevated (ICMP would just fail) or the spec was invalid.
+	if *testSpec != "" && specErr == nil && isElevated() {
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			fyne.Do(func() { u.onTestTap() })
+		}()
+	}
 	w.ShowAndRun()
 }
 

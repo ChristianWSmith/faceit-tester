@@ -27,8 +27,9 @@ func isElevated() bool {
 }
 
 // elevateAndRestart relaunches the current executable with the runas verb
-// (UAC consent prompt). On success the new elevated instance is starting
-// and the caller should exit.
+// (UAC consent prompt), forwarding os.Args[1:] so flags like --test survive
+// the round-trip (ShellExecute takes parameters separately from the exe).
+// On success the new elevated instance is starting and the caller should exit.
 func elevateAndRestart() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -42,9 +43,15 @@ func elevateAndRestart() error {
 	if err != nil {
 		return err
 	}
+	var params *uint16
+	if len(os.Args) > 1 {
+		if params, err = windows.UTF16PtrFromString(joinWinArgs(os.Args[1:])); err != nil {
+			return err
+		}
+	}
 	// ShellExecute fails with ERROR_CANCELLED (1223) when the prompt is
 	// dismissed; any other failure returns the Win32 error.
-	if err := windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL); err != nil {
+	if err := windows.ShellExecute(0, verb, file, params, nil, windows.SW_SHOWNORMAL); err != nil {
 		if errors.Is(err, windows.ERROR_CANCELLED) {
 			return errElevationCancelled
 		}
