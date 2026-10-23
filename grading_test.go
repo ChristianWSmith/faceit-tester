@@ -17,8 +17,8 @@ func TestOutcomeRowGrading(t *testing.T) {
 	row := outcomeRow(ServerOutcome{Server: srv("Chicago", "Psychz Networks", "1.2.3.4"), Result: good})
 	for i, want := range []widget.Importance{
 		widget.MediumImportance,  // server name
-		widget.SuccessImportance, // median 25 ≤ 100
 		widget.SuccessImportance, // p1 20
+		widget.SuccessImportance, // median 25 ≤ 100
 		widget.SuccessImportance, // p99 40
 		widget.SuccessImportance, // jitter 3 ≤ 10
 		widget.SuccessImportance, // loss 0 ≤ 2
@@ -36,8 +36,8 @@ func TestOutcomeRowGrading(t *testing.T) {
 	row = outcomeRow(ServerOutcome{Server: srv("EU", "OVH", "5.6.7.8"), Result: bad})
 	for i, want := range []widget.Importance{
 		widget.MediumImportance,
-		widget.DangerImportance,  // median 120 > 100
 		widget.WarningImportance, // p1 90 in [70, 100]
+		widget.DangerImportance,  // median 120 > 100
 		widget.DangerImportance,  // p99 200 > 100
 		widget.DangerImportance,  // jitter 15 > 10
 		widget.DangerImportance,  // loss 37.5 > 2
@@ -73,8 +73,8 @@ func TestOutcomeRowGrading(t *testing.T) {
 	row = outcomeRow(ServerOutcome{Server: srv("X", "y", "9.9.9.9"), Result: warnEdge})
 	for i, want := range []widget.Importance{
 		widget.MediumImportance,
-		widget.WarningImportance, // median 70 ≥ 70
 		widget.SuccessImportance, // p1 69 < 70
+		widget.WarningImportance, // median 70 ≥ 70
 		widget.WarningImportance, // p99 99 in [70, 100]
 		widget.WarningImportance, // jitter 5 ≥ 5
 		widget.WarningImportance, // loss 1.0 ≥ 1

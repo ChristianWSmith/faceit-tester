@@ -33,7 +33,7 @@ func TestWorstCase(t *testing.T) {
 		t.Error("worst-case name cell should be bold")
 	}
 	// Column-by-column max, error row skipped for numerics.
-	wantTexts := []string{"55.0", "40.0", "90.0", "12.0", "6.25%"}
+	wantTexts := []string{"40.0", "55.0", "90.0", "12.0", "6.25%"}
 	for i, want := range wantTexts {
 		if row[i+1].text != want {
 			t.Errorf("worst cell %d text = %q, want %q", i+1, row[i+1].text, want)
@@ -73,7 +73,7 @@ func TestWorstCase(t *testing.T) {
 			P99: 100 * time.Millisecond, Jitter: 1 * time.Millisecond,
 		}},
 	})
-	if single[1].text != "93.0" || single[4].text != "1.0" {
+	if single[1].text != "90.0" || single[4].text != "1.0" {
 		t.Errorf("single-provider worst row = %+v", single)
 	}
 
@@ -90,8 +90,8 @@ func TestWorstCase(t *testing.T) {
 			P99: 52 * time.Millisecond, Jitter: 25 * time.Millisecond,
 		}},
 	})
-	if mixed[1].text != "50.0" {
-		t.Errorf("mixed worst avg = %q, want 50.0", mixed[1].text)
+	if mixed[1].text != "46.0" {
+		t.Errorf("mixed worst avg = %q, want 46.0", mixed[1].text)
 	}
 	if mixed[4].text != "3.0" || mixed[4].imp != widget.SuccessImportance {
 		t.Errorf("mixed worst jitter = %+v, want 3.0 Success (scrubber excluded)", mixed[4])
@@ -108,8 +108,8 @@ func TestWorstCase(t *testing.T) {
 			P99: 52 * time.Millisecond, Jitter: 25 * time.Millisecond,
 		}},
 	})
-	if allScrub[1].text != "49.0" {
-		t.Errorf("all-scrubbed worst avg = %q, want 49.0", allScrub[1].text)
+	if allScrub[1].text != "46.0" {
+		t.Errorf("all-scrubbed worst avg = %q, want 46.0", allScrub[1].text)
 	}
 	for i := 4; i <= 5; i++ {
 		if allScrub[i].text != "n/a" || allScrub[i].imp != widget.MediumImportance {
@@ -170,7 +170,7 @@ func TestFlatten(t *testing.T) {
 	if !naRegion[0].bold {
 		t.Error("region row name should be bold")
 	}
-	if naRegion[1].text != "55.0" || naRegion[4].text != "12.0" || naRegion[5].text != "6.25%" {
+	if naRegion[1].text != "40.0" || naRegion[4].text != "12.0" || naRegion[5].text != "6.25%" {
 		t.Errorf("NA region aggregate = %v, want Datacamp worst", naRegion[1:])
 	}
 	if naRegion[1].imp != widget.SuccessImportance ||
@@ -180,7 +180,7 @@ func TestFlatten(t *testing.T) {
 	}
 	// EU single-city region matches the city row.
 	euRegion := rows[2]
-	if euRegion[1].text != "90.0" || euRegion[5].text != "1.00%" {
+	if euRegion[1].text != "80.0" || euRegion[5].text != "1.00%" {
 		t.Errorf("EU region aggregate = %v, want UK numbers", euRegion[1:])
 	}
 

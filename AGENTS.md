@@ -159,7 +159,7 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   `resultsTree.flatten()` with per-cell green/yellow/red grading: below
   the warn thresholds green, at-or-above warn / at-or-below the CS2 HUD
   thresholds yellow (WarningImportance), strictly above red (ping
-  70/100ms, jitter 5/10ms, loss 1/2%; RTT columns are median/p1/p99);
+  70/100ms, jitter 5/10ms, loss 1/2%; RTT columns are p1/median/p99);
   region/city rows are bold worst-case aggregates (scrubbed providers
   contribute RTT only — jitter/loss show n/a). The Server column
   auto-sizes to the widest name cell (`nameColumnWidth` +

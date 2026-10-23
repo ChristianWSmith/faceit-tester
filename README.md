@@ -10,7 +10,7 @@ For each selected server the app sends ICMP echo requests for 10 seconds at
 ~64 packets/sec with 600-byte payloads — approximating CS2's UDP traffic
 shape (~64 pps each way, 400–800 byte payloads). Results per server:
 
-- **Ping (med / p1 / p99)** — round-trip time percentiles in milliseconds
+- **Ping (p1 / med / p99)** — round-trip time percentiles in milliseconds
 - **Jitter** — mean variation between consecutive RTT samples (RFC 3550 style)
 - **Loss** — round-trip packet loss percentage
 

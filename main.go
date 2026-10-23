@@ -386,7 +386,7 @@ func (u *ui) rebuildHeader(nameWidth float32) {
 	}{
 		// "Ping" is the gamer term for RTT and implies milliseconds; the
 		// suffix says which statistic of the reply samples it is.
-		{"Server", nameWidth}, {"Ping (med)", metricColWidth}, {"Ping (p1)", metricColWidth},
+		{"Server", nameWidth}, {"Ping (p1)", metricColWidth}, {"Ping (med)", metricColWidth},
 		{"Ping (p99)", metricColWidth}, {"Jitter", metricColWidth}, {"Loss", metricColWidth},
 	}
 	for _, h := range headers {
@@ -842,8 +842,8 @@ func resultRow(name string, r PingResult, scrubbed bool) []tableCell {
 	}
 	return []tableCell{
 		nameCell,
-		{formatMS(r.Median), gradeMS(r.Median, pingThreshold, pingWarnThreshold, rttOK), false},
 		{formatMS(r.P1), gradeMS(r.P1, pingThreshold, pingWarnThreshold, rttOK), false},
+		{formatMS(r.Median), gradeMS(r.Median, pingThreshold, pingWarnThreshold, rttOK), false},
 		{formatMS(r.P99), gradeMS(r.P99, pingThreshold, pingWarnThreshold, rttOK), false},
 		jitterCell,
 		lossCell,
