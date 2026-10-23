@@ -40,7 +40,7 @@ enabled).
    ```
    Fix failures before proceeding. Never release on a red tree.
 
-## Phase 2 — Version, commit, and push
+## Phase 2 — Version and commit
 
 1. **Pick the next version** from the last semver tag (ignore any
    date-format tags when computing the bump):
@@ -60,43 +60,57 @@ enabled).
 4. Update `FyneApp.toml` `Version` to the chosen version (cosmetic — the
    CI stamp is authoritative — but keep it in sync).
 5. **Ask the user to confirm** the commit message, file set, and
-   version, then:
+   version, then commit — but **do not push yet** (Phase 3 pushes the
+   commit and the tag together so CI only builds once):
    ```sh
    git add -A
    git commit -m "<message>"
-   git push origin main
    ```
 6. If the tree was already clean and docs needed nothing (nothing to
-   commit), skip the commit — but still verify the remote is current
-   (`git status -sb` shows no ahead marker) and use HEAD as the release
-   commit.
+   commit), skip the commit — but still verify the remote main is
+   current (`git status -sb` shows no ahead marker; `git fetch origin`
+   if in doubt) so the tag push in Phase 3 won't be rejected.
 
-Record the pushed SHA (`git rev-parse HEAD`) — the release tag must be
-created on that exact commit.
+Record the release SHA (`git rev-parse HEAD`) — the tag is created on
+that exact commit in Phase 3.
 
-## Phase 3 — Tag and wait for CI
+## Phase 3 — Tag, push together, wait for CI
 
-Create the semver tag on the pushed commit and push it. The tag push
-triggers the CI matrix; tag builds stamp the tag name into `version.go`
-before compiling, so this run — not the earlier branch-push run —
-produces the release binaries.
+Create the semver tag locally, then push **main and the tag in one
+atomic push**. This matters: a release normally fires two CI events (one
+for the branch push, one for the tag), and the tag-triggered run is the
+one that ships (it stamps the tag name into `version.go` before
+compiling). The branch event's `guard` job skips its matrix when the
+pushed SHA is already tagged — but only if the tag is visible
+server-side when the branch event is processed. One atomic push makes
+that deterministic and a release costs exactly **one** 3-OS build.
+
+**Tag collision:** check before tagging — if `<X.Y.Z>` exists locally
+(`git tag -l`) or on the remote (`git ls-remote --tags origin`), ask the
+user for a different version — do not delete or move existing tags.
 
 ```sh
 git tag <X.Y.Z> <SHA>
-git push origin <X.Y.Z>
+git push --atomic origin main refs/tags/<X.Y.Z>
 ```
 
-**Tag collision:** if `<X.Y.Z>` already exists locally or on the remote
-(`git ls-remote --tags origin`), ask the user for a different version —
-do not delete or move existing tags.
+- **Push rejected** (remote main moved, etc.): nothing was pushed —
+  `git fetch origin && git rebase origin/main`, re-run the Phase 1
+  gate, re-check the tag collision (the tag itself is still local and
+  reusable), then push again. If the upstream changes touch release
+  files, show the user before continuing.
+- **Clean-tree path** (Phase 2 step 6): main is already pushed and
+  current, so the push only carries the tag — the command above still
+  works (`main` is a no-op).
 
-Then watch the tag-triggered run (it runs vet/test itself, so a red tree
-never produces artifacts):
+Then watch the tag-triggered run. Expect **two** runs for the SHA: the
+`main` one has only its guard job (matrix skipped — that's the dedupe
+working) and the tag one runs the full matrix; watch the tag one:
 
 ```sh
 gh run list --commit <SHA> --limit 5
-# → pick the run whose head_branch is the tag name (not main/develop;
-#   the branch-push run for the same commit also exists)
+# → pick the run whose head_branch is the tag name; the main run's
+#   build job should show "skipped"
 gh run watch <RUN_ID> --exit-status --interval 30
 ```
 
@@ -111,8 +125,11 @@ take 2–15 minutes (Windows legs are slow); the watch streams progress.
 - **No run appears within a couple minutes:** the push may not have
   landed or CI is queued — recheck with `gh run list --commit <SHA>`;
   don't proceed on assumption.
-- Note: PR-triggered and branch-push runs also exist for the same commit
-  — pick the run whose `head_branch` equals the tag name.
+- The `main` run for the same commit is expected — its `guard` job
+  detects the tag and skips the matrix (that's the single-build dedupe;
+  if its matrix *ran*, the atomic push was split and the duplicate is
+  harmless but wasteful). PR-triggered runs only exist for PR commits —
+  pick the run whose `head_branch` equals the tag name.
 
 Verify the run actually produced all three artifacts before continuing
 (don't use `gh run view --json artifacts` — gh 2.102.1 rejects that
@@ -135,7 +152,7 @@ stop and investigate.
    ```sh
    mkdir -p /tmp/faceit-release && cd /tmp/faceit-release
    gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
-     --jq '.artifacts[] | [.id, .name] | @t' |
+      --jq '.artifacts[] | [.id, .name] | @tsv' |
    while IFS=$'\t' read -r id name; do
      gh api "repos/{owner}/{repo}/actions/artifacts/${id}/zip" > "${name}.zip"
    done

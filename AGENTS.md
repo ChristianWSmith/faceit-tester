@@ -30,10 +30,13 @@ in-app updater needs only `archive/zip` — no xz dependency). Semver tag
 pushes (`X.Y.Z`, matching `[0-9]*.[0-9]*.[0-9]*`) run the same matrix
 with a stamp step that overwrites `version.go` with the tag before
 compiling — that tag run is the one that ships (branch-push runs keep
-`version = "dev"`). Linux CI needs `libgl1-mesa-dev xorg-dev` (Fyne
-cgo). Local Windows cross-compile needs mingw
-(`CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1`), but CI builds natively so
-this is rarely needed.
+`version = "dev"`). A `guard` job skips the branch-push matrix when the
+pushed SHA is already tagged, so the release flow's single atomic
+push of main+tag costs exactly one 3-OS build (the tag run); normal
+pushes/PRs are unguarded and always build. Linux CI needs
+`libgl1-mesa-dev xorg-dev` (Fyne cgo). Local Windows cross-compile needs
+mingw (`CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1`), but CI builds natively
+so this is rarely needed.
 
 App icon: `icon.png` is embedded at compile time (`//go:embed` +
 `a.SetIcon`) for the window icon, and `FyneApp.toml` gives `fyne package`
@@ -140,12 +143,15 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   `updateAssetName` + `stagePayload` in `update.go` and their tests in the
   same commit.
 - **Releases are semver-tag-first** (`.opencode/skills/release/SKILL.md`):
-  commit → tag `X.Y.Z` → the tag push triggers the build that stamps the
-  version → release is created from *that* run's artifacts (unwrapped from
-  the artifact zips and attached byte-for-byte). The branch-push run of the
-  same commit says `version = "dev"` and must never be shipped. The date
-  tag format (`MM-DD-YYYY`) is retired; same-day double releases are just
-  a patch bump.
+  commit → tag `X.Y.Z` → one atomic push of main+tag → the tag push
+  triggers the build that stamps the version → release is created from
+  *that* run's artifacts (unwrapped from the artifact zips and attached
+  byte-for-byte). The atomic push matters: the branch-push event for the
+  same commit fires alongside the tag event, and `guard` skips its matrix
+  only when it can see the tag — split the pushes and the branch run
+  rebuilds the SHA redundantly (still never ships: those binaries say
+  `version = "dev"`). The date tag format (`MM-DD-YYYY`) is retired;
+  same-day double releases are just a patch bump.
 
 ## Architecture (all in package main)
 
