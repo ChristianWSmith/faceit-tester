@@ -226,10 +226,13 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   derives tree-node keys to expand so the selection is visible;
   `quoteWinArg`/`joinWinArgs` render Windows parameter strings for
   `elevateAndRestart`'s arg forwarding (CommandLineToArgvW quoting rules).
-- `version.go` — `var version = "dev"` placeholder overwritten by CI's
-  tag-build stamp; `parseSemver` (strict X.Y.Z, round-trip-rejects junk)
-  and `updateAvailable` (semver beats legacy date tags both directions;
-  dev never prompts).
+- `version.go` — **stamp-only**: `var version = "dev"`, overwritten
+  wholesale by CI's tag-build step — never add anything else to this
+  file (the first cut of the updater put `parseSemver` here and every
+  tag build failed with `undefined: updateAvailable`).
+  `semver.go` holds `parseSemver` (strict X.Y.Z, round-trip-rejects
+  junk) and `updateAvailable` (semver beats legacy date tags both
+  directions; dev never prompts).
 - `update.go` + `update_windows.go`/`update_linux.go`/`update_darwin.go`/
   `update_other.go` — startup update check (GitHub latest-release API,
   gated by `shouldCheckUpdate`: dev/pref/`--test`/missing-asset all skip;
