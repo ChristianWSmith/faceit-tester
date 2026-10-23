@@ -97,6 +97,27 @@ scrubber — report ping only):
 }
 ```
 
+## Auto-updates
+
+Release builds check GitHub for a newer version on startup. If one
+exists, a dialog offers:
+
+- **Update** — downloads the new release, replaces the running app, and
+  restarts it (your selections are saved first).
+- **Later** — dismisses; the same offer reappears next launch.
+- **Never** — dismisses and never checks again.
+
+Update downloads are in-process (no external tools needed). On Windows
+the new instance inherits the current elevation, so there's no second
+UAC prompt. If anything fails — network, permissions, a locked file —
+the current version keeps running and the error dialog links the manual
+download page. An old file that couldn't be deleted at replace time is
+cleaned up automatically on the next launch.
+
+To re-enable checks after choosing **Never**, delete the
+`updates_disabled` key from the app's preferences file (location varies
+by OS; search your user config dir for `com.christianws.faceit-tester`).
+
 ## Platform notes
 
 - **Windows:** requires administrator rights (raw ICMP sockets). On launch
@@ -158,6 +179,10 @@ errors — is lost there (invalid specs still appear in the app's status
 bar). Run a plain `go build` console binary if you need the messages on
 a terminal.
 
+`--force-update-check` shows the update dialog even when no newer release
+exists (and even on dev builds or after **Never**) — used for reviewing
+the update UI without shipping a release.
+
 ## Building
 
 ```sh
@@ -182,7 +207,9 @@ fyne package -release
 ```
 
 CI packages all three platforms on every push with `fyne package` and
-publishes them as workflow artifacts.
+publishes them as workflow artifacts; semver tag pushes (`X.Y.Z`) stamp
+the tag into the binary and produce the release assets (plain zips —
+the in-app updater unpacks them itself).
 
 ## License
 

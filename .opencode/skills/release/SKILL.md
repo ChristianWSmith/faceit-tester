@@ -1,26 +1,30 @@
 ---
 name: release
-description: Use when cutting a new public release of this app — e.g. "make a new release", "cut a release", "ship it", "publish a build", "release the latest changes", "download the CI builds and release". Covers the full pipeline: docs staleness check, gofmt/vet/test green, commit and push, waiting for all three CI matrix runners, downloading their artifacts, and creating the MM-DD-YYYY GitHub release with the artifacts attached.
+description: Use when cutting a new public release of this app — e.g. "make a new release", "cut a release", "ship it", "publish a build", "download the CI builds and release". Covers the full pipeline: docs staleness check, gofmt/vet/test green, commit and push, tagging with a semver version, waiting for the tag-triggered CI matrix, downloading its artifacts, and creating the semver GitHub release with the assets attached.
 ---
 
 # Cut a Release
 
 Full pipeline from a dirty working tree to a published GitHub release:
-verify docs and checks, commit and push, wait for the three-runner CI
-matrix to go green, download its artifacts, and publish a release named
-in `MM-DD-YYYY` format (matching the existing `10-20-2026` /
-`10-22-2026` releases — tag = title = date, no `v` prefix).
+verify docs and checks, commit and push, tag the commit with a semver
+version (`X.Y.Z`, no `v` prefix), wait for the tag-triggered CI matrix to
+go green, download its artifacts, and publish the release. The tag build
+stamps the version into the binary (`version.go`), which is what the
+in-app updater compares against on other installs.
 
-There are two confirmation checkpoints (commit, publish). Everything else
-runs autonomously. `gh` is already authenticated; the workflow is
-`.github/workflows/ci.yml` (single `build` job, matrix over
-ubuntu/windows/macos, one artifact per OS).
+There are three confirmation checkpoints (commit, version bump,
+publish). Everything else runs autonomously. `gh` is already
+authenticated; the workflow is `.github/workflows/ci.yml` (single `build`
+job, matrix over ubuntu/windows/macos, one artifact per OS; tags matching
+`[0-9]*.[0-9]*.[0-9]*` trigger the same job with the version stamp step
+enabled).
 
 ## Phase 1 — Docs and checks
 
 1. **Find the last release point:** `git describe --tags --abbrev=0`
    (falls back to nothing on a fresh clone — then ask the user for the
-   baseline).
+   baseline). Historical tags may use the retired `MM-DD-YYYY` format;
+   only semver tags are releasable going forward.
 2. **Review docs for staleness:** diff the tree since that tag
    (`git diff <last-tag>..HEAD`) and check that README.md and AGENTS.md
    still describe reality — feature lists, CLI flags, column order,
@@ -36,35 +40,63 @@ ubuntu/windows/macos, one artifact per OS).
    ```
    Fix failures before proceeding. Never release on a red tree.
 
-## Phase 2 — Commit and push
+## Phase 2 — Version, commit, and push
 
-1. Confirm the branch is `main` and show the user:
+1. **Pick the next version** from the last semver tag (ignore any
+   date-format tags when computing the bump):
+   - fix / chore / docs only since the last tag → patch bump (`0.2.0` → `0.2.1`)
+   - any feat / UI change / user-facing improvement → minor bump (`0.2.0` → `0.3.0`)
+   - breaking change (prefs format, CLI flags removed, server-list schema) → major bump
+   - never released a semver tag before → propose `0.2.0` (the committed
+     `FyneApp.toml` says `0.1.0`; treat that as the implicit baseline)
+2. **Ask the user to confirm the version** along with the commit
+   review below. Same-day double releases are fine — just bump patch
+   (`0.2.1`); there is no calendar-collision rule anymore.
+3. Confirm the branch is `main` and show the user:
    - `git status --short` (pending code + any doc edits from Phase 1)
    - a one-paragraph summary of what's changing
    - the proposed commit message (sentence-case summary in the repo's
      style; `docs:` prefix when the commit is documentation-only)
-2. **Ask the user to confirm** the commit message and file set, then:
+4. Update `FyneApp.toml` `Version` to the chosen version (cosmetic — the
+   CI stamp is authoritative — but keep it in sync).
+5. **Ask the user to confirm** the commit message, file set, and
+   version, then:
    ```sh
    git add -A
    git commit -m "<message>"
    git push origin main
    ```
-3. If the tree was already clean and docs needed nothing (nothing to
+6. If the tree was already clean and docs needed nothing (nothing to
    commit), skip the commit — but still verify the remote is current
    (`git status -sb` shows no ahead marker) and use HEAD as the release
    commit.
 
-Record the pushed SHA (`git rev-parse HEAD`) — the release must come
-from that exact commit's CI run.
+Record the pushed SHA (`git rev-parse HEAD`) — the release tag must be
+created on that exact commit.
 
-## Phase 3 — Wait for CI
+## Phase 3 — Tag and wait for CI
 
-The push triggers one workflow run with a 3-OS matrix; all three legs
-must succeed and upload artifacts.
+Create the semver tag on the pushed commit and push it. The tag push
+triggers the CI matrix; tag builds stamp the tag name into `version.go`
+before compiling, so this run — not the earlier branch-push run —
+produces the release binaries.
 
 ```sh
-gh run list --commit <SHA> --branch main --limit 1
-# → grab the run ID (the "Build Fyne App" / build job run)
+git tag <X.Y.Z> <SHA>
+git push origin <X.Y.Z>
+```
+
+**Tag collision:** if `<X.Y.Z>` already exists locally or on the remote
+(`git ls-remote --tags origin`), ask the user for a different version —
+do not delete or move existing tags.
+
+Then watch the tag-triggered run (it runs vet/test itself, so a red tree
+never produces artifacts):
+
+```sh
+gh run list --commit <SHA> --limit 5
+# → pick the run whose head_branch is the tag name (not main/develop;
+#   the branch-push run for the same commit also exists)
 gh run watch <RUN_ID> --exit-status --interval 30
 ```
 
@@ -73,13 +105,14 @@ take 2–15 minutes (Windows legs are slow); the watch streams progress.
 
 - **Run fails:** identify the failing OS + step
   (`gh run view <RUN_ID> --log-failed`), report it to the user, and
-  **stop** — no download, no release. Fix-forward with a new commit
-  (which triggers a fresh run; switch to that run ID).
+  **stop** — no download, no release. Fix-forward with a new commit on
+  main (which does not re-trigger the tag; re-tag the new commit with a
+  patch bump after pushing it, e.g. a failed `0.3.0` ships as `0.3.1`).
 - **No run appears within a couple minutes:** the push may not have
   landed or CI is queued — recheck with `gh run list --commit <SHA>`;
   don't proceed on assumption.
-- Note: PR-triggered runs also exist for the same commit — pick the run
-  whose `event` is `push` and branch is `main`.
+- Note: PR-triggered and branch-push runs also exist for the same commit
+  — pick the run whose `head_branch` equals the tag name.
 
 Verify the run actually produced all three artifacts before continuing
 (don't use `gh run view --json artifacts` — gh 2.102.1 rejects that
@@ -90,26 +123,19 @@ gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
   --jq '.artifacts[] | "\(.name)\t\(.size_in_bytes)"'
 ```
 
-Expect exactly: `faceit-tester-linux-amd64.tar.xz`,
-`faceit-tester-windows-amd64.exe`, `faceit-tester-macos.app`, all with
-non-zero sizes. Missing artifact on a green run = packaging bug; stop
-and investigate.
+Expect exactly: `faceit-tester-linux-amd64.zip`,
+`faceit-tester-windows-amd64.exe.zip`, `faceit-tester-macos.app.zip`,
+all with non-zero sizes. Missing artifact on a green run = packaging bug;
+stop and investigate.
 
 ## Phase 4 — Download artifacts and publish
 
-1. **Tag name:** `date +%m-%d-%Y` (zero-padded, e.g. `10-23-2026`).
-   If `gh release view <TAG>` succeeds, a release already exists for
-   today (re-releasing the same day) — **ask the user** how to proceed
-   rather than guessing a suffix.
-2. **Download the artifact archives** (release assets are the zipped
-   artifact archives, matching the `10-20-2026`/`10-22-2026` releases —
-   e.g. `faceit-tester-windows-amd64.exe.zip`). Fetch each zip via the
-   Actions API into a scratch dir — `gh api` has no `-o` flag, so
-   redirect stdout (it prints the raw body):
+1. **Download the artifact archives** into a scratch dir. `gh api` has no
+   `-o` flag, so redirect stdout (it prints the raw body):
    ```sh
    mkdir -p /tmp/faceit-release && cd /tmp/faceit-release
    gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
-     --jq '.artifacts[] | [.id, .name] | @tsv' |
+     --jq '.artifacts[] | [.id, .name] | @t' |
    while IFS=$'\t' read -r id name; do
      gh api "repos/{owner}/{repo}/actions/artifacts/${id}/zip" > "${name}.zip"
    done
@@ -120,37 +146,67 @@ and investigate.
    compare sizes against the `size_in_bytes` from the artifact listing
    in Phase 3 (they should match exactly; a short file means a
    truncated/HTML error body, not a zip).
-3. **Release notes:** one bullet per commit since the last tag —
+2. **Unwrap the artifact zips** — each contains one final release zip
+   (CI uploads zips, and the artifact service wraps those in another
+   zip). Extract the inner files; these are the release assets, attached
+   verbatim:
+   ```sh
+   for f in *.zip; do unzip -o "$f"; done
+   # → faceit-tester-linux-amd64.zip
+   #   faceit-tester-windows-amd64.exe.zip
+   #   faceit-tester-macos.app.zip
+   ```
+   Don't re-zip or rename the inner files — attach them byte-for-byte so
+   checksums match what CI built (the in-app updater unpacks these).
+3. **Sanity-check the linux zip** contains the expected tree and the
+   binary carries its exec bit (the updater chmods anyway, but manual
+   installers `make install` straight from it):
+   ```sh
+   unzip -l faceit-tester-linux-amd64.zip | head
+   # expect faceit-tester/usr/local/bin/faceit-tester, Makefile, etc.
+   unzip -Z faceit-tester-linux-amd64.zip | grep 'usr/local/bin'
+   # expect -rwxr-xr-x (or at least a regular file the updater chmods)
+   ```
+4. **Release notes:** one bullet per commit since the last tag —
    `git log --oneline <last-tag>..<SHA>` condensed to user-facing
    changes (skip pure chore/docs commits unless notable). Show the notes
-   to the user along with the date and asset list; **ask for final
+   to the user along with the version and asset list; **ask for final
    confirmation** before publishing.
-4. **Publish:**
+5. **Publish:**
    ```sh
-   gh release create <TAG> \
-     --title <TAG> \
+   gh release create <X.Y.Z> \
+     --title <X.Y.Z> \
      --target <SHA> \
      --notes "<notes>" \
-     /tmp/faceit-release/*.zip
+     /tmp/faceit-release/faceit-tester-linux-amd64.zip \
+     /tmp/faceit-release/faceit-tester-windows-amd64.exe.zip \
+     /tmp/faceit-release/faceit-tester-macos.app.zip
    ```
-5. **Verify:** `gh release view <TAG>` shows the three assets
-   (`faceit-tester-linux-amd64.tar.xz.zip`,
-   `faceit-tester-windows-amd64.exe.zip`,
-   `faceit-tester-macos.app.zip`) and the release is marked Latest.
-   Clean up the scratch dir. Report the release URL to the user.
+6. **Verify:** `gh release view <X.Y.Z>` shows the three assets and the
+   release is marked Latest. Clean up the scratch dir. Report the
+   release URL to the user.
+
+The release is now live for the in-app updater: older semver installs
+see the new tag on their next launch (semver unconditionally supersedes
+the retired date tags, so no install is stranded).
 
 ## Gotchas
 
 - **Never release from a red or unpushed tree.** Phase 1 and 2 gate
-  everything; the release target SHA must equal the SHA of the green
-  run.
-- Tag/title format is strictly `MM-DD-YYYY` with zero padding and no
-  `v` prefix — it's a calendar label, not semver. `--target` pins the
-  tag to the pushed commit so the release never drifts from its CI run.
+  everything; the release tag must sit on the SHA of the green tag run.
+- Tag/title format is strictly semver `X.Y.Z`, zero `v` prefix. The tag
+  push *is* the build trigger — `--target` on `gh release create` pins
+  the release to the same commit the tag already points at, so the
+  release never drifts from its CI run.
+- The tag-triggered run is the one that ships: it stamps `version.go`
+  with the tag before compiling. Never publish artifacts from the
+  branch-push run of the same commit (those say `version = "dev"` and
+  would never update-check).
 - The macOS artifact is a zipped `.app` *directory* (not a single
   file); the Windows artifact is the GUI-subsystem exe (`-H
-  windowsgui`). Don't rename or re-zip assets — attach the API zips as
-  downloaded so checksums match what CI uploaded.
+  windowsgui`) zipped by CI. The updater needs these exact layouts —
+  if the packaging steps in `ci.yml` change, update `stagePayload` in
+  `update.go` and its tests in the same commit.
 - `gh run watch` without `--exit-status` exits 0 even on failure —
   always pass it, or a failed build silently becomes a "successful"
   wait.
@@ -160,8 +216,9 @@ and investigate.
   download binary bodies by redirecting stdout (`... > file.zip`), and
   sanity-check the byte size against the artifact's `size_in_bytes` so
   an error page doesn't get saved as a fake zip.
-- Same-day re-releases need a human decision (the calendar tag
-  collides); don't invent a scheme on the fly.
-- This skill commits and pushes by design, but only after the user
-  confirms the commit in Phase 2 — and publishes only after the Phase 4
-  confirmation. Nothing public happens without those two yeses.
+- A failed tag run ships as a patch bump (`0.3.0` failed → tag `0.3.1`
+  on the fix commit); never move or delete a published tag.
+- This skill commits, tags, and pushes by design, but only after the
+  user confirms the commit + version in Phase 2 — and publishes only
+  after the Phase 4 confirmation. Nothing public happens without those
+  two yeses.

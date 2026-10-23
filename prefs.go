@@ -7,6 +7,10 @@ const (
 	// prefsExpandedKey is the Preferences key holding the list of expanded
 	// tree nodes (region names and "Region/City" paths).
 	prefsExpandedKey = "expanded_nodes"
+	// prefsUpdatesDisabledKey is the Preferences key set by the update
+	// dialog's "Never" button; when true the startup update check is
+	// skipped (a forced --force-update-check still runs it).
+	prefsUpdatesDisabledKey = "updates_disabled"
 )
 
 // aggregate reports whether every child is checked (all) and whether at

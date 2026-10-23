@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"image/color"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -108,6 +109,7 @@ func main() {
 	// elevation check so --help never triggers a UAC prompt.
 	flag.CommandLine.SetOutput(os.Stdout)
 	testSpec := flag.String("test", "", `auto-start a test: JSON spec of regions/cities/providers, e.g. {"NA":"all"}`)
+	forceUpdate := flag.Bool("force-update-check", false, "show the update dialog even when no newer release exists (dev/UI-review)")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "FACEIT Connection Tester — pre-flight ICMP connection tester for FACEIT CS2 locations.\n\n")
@@ -126,6 +128,9 @@ Names match case-insensitively; "all" is reserved at every level. The
 selection replaces the checkbox state and is saved on exit. On Windows
 the app requests administrator rights on launch; a --test flag survives
 the elevated relaunch and starts automatically once the window is up.
+--force-update-check bypasses the update-check gates (dev build, "Never"
+pref, --test) so the update dialog can be reviewed without a real
+pending release.
 `)
 	}
 	flag.Parse()
@@ -136,6 +141,9 @@ the elevated relaunch and starts automatically once the window is up.
 	// writes are silent no-ops in the windowsgui build, which has no
 	// console handles).
 	servers := loadServers()
+	// Sweep "<exe>.old" / "*.app.old" trash left by a previous self-update
+	// before anything else touches the install directory. Best-effort.
+	cleanupOlds()
 	var (
 		specErr error
 		sel     map[string]bool
@@ -223,7 +231,131 @@ the elevated relaunch and starts automatically once the window is up.
 			fyne.Do(func() { u.onTestTap() })
 		}()
 	}
+	// Startup update check: same once-the-loop-is-running pattern as the
+	// --test autostart. --force-update-check bypasses the gates so the
+	// dialog can be reviewed on dev builds and after "Never".
+	if shouldCheckUpdate(version, *testSpec, prefs.Bool(prefsUpdatesDisabledKey), *forceUpdate, updateAssetName()) {
+		go u.checkForUpdate(*forceUpdate)
+	}
 	w.ShowAndRun()
+}
+
+// updateHTTPClient is shared by the release lookup and the asset download.
+func updateHTTPClient() *http.Client {
+	return &http.Client{Timeout: 60 * time.Second}
+}
+
+// checkForUpdate fetches the latest release and, when an update applies
+// (or force is set for UI review), shows the three-button dialog. Runs on
+// its own goroutine; every UI touch goes through fyne.Do. Network errors
+// fail silent — being offline is not an error condition at startup.
+func (u *ui) checkForUpdate(force bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rel, err := fetchLatestRelease(ctx, updateHTTPClient())
+	if err != nil {
+		return
+	}
+	if !force && !updateAvailable(version, rel.TagName) {
+		return
+	}
+	fyne.Do(func() { u.showUpdateDialog(rel, force) })
+}
+
+// showUpdateDialog offers Update / Later / Never for the pending release.
+// Later dismisses and re-offers next launch; Never persists the opt-out
+// immediately (a crash must not resurrect the prompt); Update saves the
+// server selection first (the relaunch restores it) and runs the
+// download/replace flow with a progress dialog.
+func (u *ui) showUpdateDialog(rel releaseInfo, force bool) {
+	assetName := updateAssetName()
+	if _, ok := assetDownloadURL(rel, assetName); !ok && !force {
+		return // vanished between check and dialog; don't offer a dead update
+	}
+	youHave := version
+	if youHave == "" || youHave == "dev" {
+		youHave = "a dev build"
+	}
+	body := widget.NewLabel(fmt.Sprintf("Version %s is available (you have %s).\n\n"+
+		"Update downloads the new version, replaces this one, and restarts.",
+		rel.TagName, youHave))
+	body.Wrapping = fyne.TextWrapWord
+
+	var d *dialog.CustomDialog
+	laterBtn := widget.NewButton("Later", func() { d.Hide() })
+	neverBtn := widget.NewButton("Never", func() {
+		// Written immediately, not via saveAllPrefs-on-close: the whole
+		// point of Never is that it sticks.
+		u.prefs.SetBool(prefsUpdatesDisabledKey, true)
+		d.Hide()
+	})
+	updateBtn := widget.NewButton("Update", func() {
+		d.Hide()
+		u.onUpdateConfirm(rel)
+	})
+	updateBtn.Importance = widget.SuccessImportance
+
+	buttons := container.NewHBox(laterBtn, neverBtn, layout.NewSpacer(), updateBtn)
+	content := container.NewBorder(nil, buttons, nil, nil, body)
+	d = dialog.NewCustomWithoutButtons("Update available", content, u.window)
+	d.Resize(fyne.NewSize(420, 0))
+	d.Show()
+}
+
+// onUpdateConfirm saves prefs, shows a progress dialog, and runs
+// applyUpdate on a goroutine. Any failure keeps the current version
+// running and surfaces the error with a manual-download link.
+func (u *ui) onUpdateConfirm(rel releaseInfo) {
+	u.saveAllPrefs()
+
+	prog := widget.NewProgressBar()
+	status := widget.NewLabel("Downloading " + rel.TagName + "…")
+	status.Wrapping = fyne.TextWrapWord
+	cancelled := false
+	closeBtn := widget.NewButton("Cancel", func() { cancelled = true })
+	buttons := container.NewHBox(layout.NewSpacer(), closeBtn)
+	p := dialog.NewCustomWithoutButtons("Updating", container.NewBorder(nil, buttons, nil, nil,
+		container.NewVBox(status, prog)), u.window)
+	p.Resize(fyne.NewSize(420, 0))
+	p.Show()
+
+	client := updateHTTPClient()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Poll the cancel flag; applyUpdate only aborts at the next ctx
+		// check (download read or GitHub round-trip).
+		for !cancelled {
+			time.Sleep(100 * time.Millisecond)
+		}
+		cancel()
+	}()
+	go func() {
+		err := applyUpdate(ctx, client, rel, func(frac float64) {
+			fyne.Do(func() {
+				if frac >= 0 {
+					prog.SetValue(frac)
+				}
+			})
+		})
+		fyne.Do(func() {
+			p.Hide()
+			cancel()
+			if err == nil {
+				// New process is starting (windows/darwin) or exec'd
+				// in place (linux); close this one.
+				u.window.Close()
+				return
+			}
+			if ctx.Err() != nil && cancelled {
+				u.statusLabel.SetText("Update cancelled — still running " + version + ".")
+				return
+			}
+			dialog.ShowError(fmt.Errorf(
+				"couldn't install the update: %v\n\n"+
+					"Your current version keeps running. Download the new release manually:\n%s",
+				err, updateManualURL), u.window)
+		})
+	}()
 }
 
 func (u *ui) build() {
