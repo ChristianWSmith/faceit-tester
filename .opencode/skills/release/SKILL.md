@@ -81,15 +81,19 @@ take 2–15 minutes (Windows legs are slow); the watch streams progress.
 - Note: PR-triggered runs also exist for the same commit — pick the run
   whose `event` is `push` and branch is `main`.
 
-Verify the run actually produced all three artifacts before continuing:
+Verify the run actually produced all three artifacts before continuing
+(don't use `gh run view --json artifacts` — gh 2.102.1 rejects that
+field; the REST API works):
 
 ```sh
-gh run view <RUN_ID> --json artifacts --jq '.artifacts[].name'
+gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
+  --jq '.artifacts[] | "\(.name)\t\(.size_in_bytes)"'
 ```
 
 Expect exactly: `faceit-tester-linux-amd64.tar.xz`,
-`faceit-tester-windows-amd64.exe`, `faceit-tester-macos.app`. Missing
-artifact on a green run = packaging bug; stop and investigate.
+`faceit-tester-windows-amd64.exe`, `faceit-tester-macos.app`, all with
+non-zero sizes. Missing artifact on a green run = packaging bug; stop
+and investigate.
 
 ## Phase 4 — Download artifacts and publish
 
@@ -100,18 +104,22 @@ artifact on a green run = packaging bug; stop and investigate.
 2. **Download the artifact archives** (release assets are the zipped
    artifact archives, matching the `10-20-2026`/`10-22-2026` releases —
    e.g. `faceit-tester-windows-amd64.exe.zip`). Fetch each zip via the
-   Actions API into a scratch dir:
+   Actions API into a scratch dir — `gh api` has no `-o` flag, so
+   redirect stdout (it prints the raw body):
    ```sh
    mkdir -p /tmp/faceit-release && cd /tmp/faceit-release
    gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
      --jq '.artifacts[] | [.id, .name] | @tsv' |
    while IFS=$'\t' read -r id name; do
-     gh api "repos/{owner}/{repo}/actions/artifacts/${id}/zip" -o "${name}.zip"
+     gh api "repos/{owner}/{repo}/actions/artifacts/${id}/zip" > "${name}.zip"
    done
    ```
    `{owner}/{repo}` comes from `gh repo view --json nameWithOwner
    --jq .nameWithOwner` (currently `ChristianWSmith/faceit-tester`).
-   Verify three non-empty `.zip` files landed in the scratch dir.
+   Verify three non-empty `.zip` files landed in the scratch dir —
+   compare sizes against the `size_in_bytes` from the artifact listing
+   in Phase 3 (they should match exactly; a short file means a
+   truncated/HTML error body, not a zip).
 3. **Release notes:** one bullet per commit since the last tag —
    `git log --oneline <last-tag>..<SHA>` condensed to user-facing
    changes (skip pure chore/docs commits unless notable). Show the notes
@@ -146,6 +154,12 @@ artifact on a green run = packaging bug; stop and investigate.
 - `gh run watch` without `--exit-status` exits 0 even on failure —
   always pass it, or a failed build silently becomes a "successful"
   wait.
+- **gh CLI quirks (seen on 2.102.1):** `gh run view --json artifacts`
+  errors ("Unknown JSON field") — list artifacts via
+  `gh api .../runs/<ID>/artifacts` instead. `gh api` has no `-o` flag —
+  download binary bodies by redirecting stdout (`... > file.zip`), and
+  sanity-check the byte size against the artifact's `size_in_bytes` so
+  an error page doesn't get saved as a fake zip.
 - Same-day re-releases need a human decision (the calendar tag
   collides); don't invent a scheme on the fly.
 - This skill commits and pushes by design, but only after the user
