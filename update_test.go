@@ -230,8 +230,14 @@ func TestExtractZipSlipRejected(t *testing.T) {
 func TestExtractZipAbsolutePathRejected(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "evil.zip")
+	// Absolute per filepath.IsAbs on the current OS: "/x" on unix,
+	// drive-lettered on windows ("/tmp" is relative there).
+	absEntry := "/tmp/absolute"
+	if runtime.GOOS == "windows" {
+		absEntry = "C:/tmp/absolute"
+	}
 	writeTestZip(t, zipPath, map[string]string{
-		"/tmp/absolute": "pwned",
+		absEntry: "pwned",
 	})
 	dest := filepath.Join(dir, "out")
 	if err := os.MkdirAll(dest, 0755); err != nil {
@@ -290,14 +296,20 @@ func TestFindAppBundle(t *testing.T) {
 }
 
 func TestEnclosingAppBundle(t *testing.T) {
+	// filepath-constructed paths so separators match on windows too.
+	inside := filepath.Join(string(filepath.Separator)+"Applications",
+		"faceit-tester.app", "Contents", "MacOS", "faceit-tester")
+	insideWant := filepath.Join(string(filepath.Separator)+"Applications", "faceit-tester.app")
+	bare := filepath.Join(string(filepath.Separator)+"opt", "faceit-tester")
+	trashInside := filepath.Join(string(filepath.Separator)+"opt", "Fake.app.old", "inner")
 	tests := []struct {
 		path, want string
 	}{
-		{"/Applications/faceit-tester.app/Contents/MacOS/faceit-tester", "/Applications/faceit-tester.app"},
-		{"/opt/faceit-tester", ""},
+		{inside, insideWant},
+		{bare, ""},
 		// ".app.old" trash bundles don't match (suffix must be exactly
 		// ".app"), which is correct: cleanupOlds handles them separately.
-		{"/opt/Fake.app.old/inner", ""},
+		{trashInside, ""},
 	}
 	for _, tt := range tests {
 		if got := enclosingAppBundle(tt.path); got != tt.want {
