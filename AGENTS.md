@@ -26,14 +26,12 @@ No linter/formatter beyond `gofmt` + `go vet`. CI (`.github/workflows/ci.yml`)
 packages ubuntu/windows/macos with `fyne package -release` (needs
 `fyne.io/fyne/v2/cmd/fyne@v2.8.2`) and uploads artifacts; every platform
 ships as a plain `.zip` (Linux is re-zipped from fyne's tar.xz so the
-in-app updater needs only `archive/zip` — no xz dependency). Semver tag
-pushes (`X.Y.Z`, matching `[0-9]*.[0-9]*.[0-9]*`) run the same matrix
-with a stamp step that overwrites `version.go` with the tag before
-compiling — that tag run is the one that ships (branch-push runs keep
-`version = "dev"`). A `guard` job skips the branch-push matrix when the
-pushed SHA is already tagged, so the release flow's single atomic
-push of main+tag costs exactly one 3-OS build (the tag run); normal
-pushes/PRs are unguarded and always build. Linux CI needs
+in-app updater needs only `archive/zip` — no xz dependency). Builds run
+only via `workflow_dispatch` (the release skill passes the version to
+stamp — the stamp step overwrites `version.go` before compiling; the
+input is regex-validated `X.Y.Z`) and `pull_request`; pushes never
+build. Unstamped builds keep `version = "dev"`, which never prompts for
+updates. Linux CI needs
 `libgl1-mesa-dev xorg-dev` (Fyne cgo). Local Windows cross-compile needs
 mingw (`CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1`), but CI builds natively
 so this is rarely needed.
@@ -156,16 +154,16 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   Windows builds can never self-update — staging looked for the
   extensionless `faceit-tester` instead of `faceit-tester.exe` (fixed in
   1.0.1), so those installs need a one-time manual download.
-- **Releases are semver-tag-first** (`.opencode/skills/release/SKILL.md`):
-  commit → tag `X.Y.Z` → one atomic push of main+tag → the tag push
-  triggers the build that stamps the version → release is created from
-  *that* run's artifacts (unwrapped from the artifact zips and attached
-  byte-for-byte). The atomic push matters: the branch-push event for the
-  same commit fires alongside the tag event, and `guard` skips its matrix
-  only when it can see the tag — split the pushes and the branch run
-  rebuilds the SHA redundantly (still never ships: those binaries say
-  `version = "dev"`). The date tag format (`MM-DD-YYYY`) is retired;
-  same-day double releases are just a patch bump.
+- **Releases are dispatch-built** (`.opencode/skills/release/SKILL.md`):
+  commit → plain push of main (pushes no longer build) → `gh workflow
+  run` with the version input → the dispatch run stamps `version.go` and
+  builds → only after it's green, tag `X.Y.Z` at the same SHA and create
+  the release from *that* run's artifacts (unwrapped from the artifact
+  zips and attached byte-for-byte; `gh release create --target` pins the
+  tag). A failed run means fix-forward and re-dispatch — the same
+  version is still free because no tag exists until the build is green.
+  The date tag format (`MM-DD-YYYY`) is retired; same-day double
+  releases are just a patch bump.
 
 ## Architecture (all in package main)
 

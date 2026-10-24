@@ -1,9 +1,16 @@
 name: Build Fyne App
 
+# Builds run only on demand: the release skill dispatches this workflow
+# with the version to stamp into the binary, and pull requests build to
+# stay validated. Pushes to main/develop do NOT build (a release is one
+# dispatch run, not a branch run plus a tag run).
 on:
-  push:
-    branches: [ main, develop ]
-    tags: [ '[0-9]*.[0-9]*.[0-9]*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp into the binary (X.Y.Z)"
+        required: true
+        type: string
   pull_request:
     branches: [ main, develop ]
 
@@ -11,38 +18,7 @@ env:
   UPLOAD_DIR: upload
 
 jobs:
-  # Skips the expensive matrix when the pushed commit is already tagged:
-  # a release pushes main + tag together, the tag-triggered run owns that
-  # SHA (it stamps version.go), and rebuilding it on the branch event is
-  # pure waste. Unguarded paths (normal pushes, PRs) always build.
-  guard:
-    name: Check
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.check.outputs.build }}
-    steps:
-      - name: Check whether the tag build already covers this SHA
-        id: check
-        shell: bash
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Branch/PR push: skip when this exact commit is already tagged.
-          # On any ls-remote failure `tagged` stays empty and we fall
-          # through to build=true so CI can never be silently skipped.
-          tagged=$(git ls-remote --tags "https://github.com/${{ github.repository }}" 2>/dev/null | cut -f1) || true
-          if printf '%s\n' "$tagged" | grep -qxF "${{ github.sha }}"; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Commit is tagged; deferring to the tag-triggered run."
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
-
   build:
-    needs: guard
-    if: needs.guard.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,12 +40,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Stamp version (tag builds)
-        if: github.ref_type == 'tag'
+      - name: Validate version input
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
-        # Overwrite the committed "dev" placeholder with the release tag so
-        # the binary knows its own version for the startup update check.
-        run: printf 'package main\n\n// version is the release tag this binary was built from.\nvar version = "%s"\n' "${{ github.ref_name }}" > version.go
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version input must be X.Y.Z, got '${{ inputs.version }}'" >&2
+            exit 1
+          fi
+
+      - name: Stamp version (release builds)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        # Overwrite the committed "dev" placeholder with the release version
+        # so the binary knows its own version for the startup update check.
+        run: printf 'package main\n\n// version is the release this binary was built from.\nvar version = "%s"\n' "${{ inputs.version }}" > version.go
 
       - name: Install System Dependencies (Linux)
         if: runner.os == 'Linux'

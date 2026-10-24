@@ -211,10 +211,10 @@ go install fyne.io/fyne/v2/cmd/fyne@v2.8.2
 fyne package -release
 ```
 
-CI packages all three platforms on every push with `fyne package` and
-publishes them as workflow artifacts; semver tag pushes (`X.Y.Z`) stamp
-the tag into the binary and produce the release assets (plain zips —
-the in-app updater unpacks them itself).
+CI packages all three platforms on demand (a manual workflow dispatch
+with the version to stamp into the binary — that's how releases are
+built — and on pull requests) with `fyne package`, publishing plain
+zips as workflow artifacts; the in-app updater unpacks them itself.
 
 ## License
 

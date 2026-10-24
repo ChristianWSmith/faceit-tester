@@ -1,23 +1,24 @@
 ---
 name: release
-description: Use when cutting a new public release of this app — e.g. "make a new release", "cut a release", "ship it", "publish a build", "download the CI builds and release". Covers the full pipeline: docs staleness check, gofmt/vet/test green, commit and push, tagging with a semver version, waiting for the tag-triggered CI matrix, downloading its artifacts, and creating the semver GitHub release with the assets attached.
+description: Use when cutting a new public release of this app — e.g. "make a new release", "cut a release", "ship it", "publish a build", "download the CI builds and release". Covers the full pipeline: docs staleness check, gofmt/vet/test green, commit and push, dispatching the version-stamped CI matrix, waiting for it to go green, tagging with a semver version, downloading its artifacts, and creating the semver GitHub release with the assets attached.
 ---
 
 # Cut a Release
 
 Full pipeline from a dirty working tree to a published GitHub release:
-verify docs and checks, commit and push, tag the commit with a semver
-version (`X.Y.Z`, no `v` prefix), wait for the tag-triggered CI matrix to
-go green, download its artifacts, and publish the release. The tag build
-stamps the version into the binary (`version.go`), which is what the
-in-app updater compares against on other installs.
+verify docs and checks, commit and push, dispatch the CI matrix with the
+version to stamp, wait for it to go green, tag the exact commit it
+built, download its artifacts, and publish the release. The dispatch
+build stamps the version into the binary (`version.go`), which is what
+the in-app updater compares against on other installs.
 
 There are three confirmation checkpoints (commit, version bump,
 publish). Everything else runs autonomously. `gh` is already
 authenticated; the workflow is `.github/workflows/ci.yml` (single `build`
-job, matrix over ubuntu/windows/macos, one artifact per OS; tags matching
-`[0-9]*.[0-9]*.[0-9]*` trigger the same job with the version stamp step
-enabled).
+job, matrix over ubuntu/windows/macos, one artifact per OS; only
+`workflow_dispatch` — with a required `version` input — and
+`pull_request` trigger it, so pushes never build and a release is
+exactly one 3-OS run).
 
 ## Phase 1 — Docs and checks
 
@@ -60,8 +61,8 @@ enabled).
 4. Update `FyneApp.toml` `Version` to the chosen version (cosmetic — the
    CI stamp is authoritative — but keep it in sync).
 5. **Ask the user to confirm** the commit message, file set, and
-   version, then commit — but **do not push yet** (Phase 3 pushes the
-   commit and the tag together so CI only builds once):
+   version, then commit. Pushing happens in Phase 3; a plain push is
+   safe (pushes don't trigger builds):
    ```sh
    git add -A
    git commit -m "<message>"
@@ -69,81 +70,69 @@ enabled).
 6. If the tree was already clean and docs needed nothing (nothing to
    commit), skip the commit — but still verify the remote main is
    current (`git status -sb` shows no ahead marker; `git fetch origin`
-   if in doubt) so the tag push in Phase 3 won't be rejected.
+   if in doubt) so the Phase 3 push can't be rejected.
 
-Record the release SHA (`git rev-parse HEAD`) — the tag is created on
-that exact commit in Phase 3.
+Record the release SHA (`git rev-parse HEAD`) — the dispatch run, the
+tag, and the release must all sit on this exact commit.
 
-## Phase 3 — Tag, push together, wait for CI
+## Phase 3 — Push, dispatch the stamped build, wait for CI
 
-Create the semver tag locally, then push **main and the tag in one
-atomic push**. This matters: a release normally fires two CI events (one
-for the branch push, one for the tag), and the tag-triggered run is the
-one that ships (it stamps the tag name into `version.go` before
-compiling). The branch event's `guard` job skips its matrix when the
-pushed SHA is already tagged — but only if the tag is visible
-server-side when the branch event is processed. One atomic push makes
-that deterministic and a release costs exactly **one** 3-OS build.
-
-**Tag collision:** check before tagging — if `<X.Y.Z>` exists locally
-(`git tag -l`) or on the remote (`git ls-remote --tags origin`), ask the
-user for a different version — do not delete or move existing tags.
-
-```sh
-git tag <X.Y.Z> <SHA>
-git push --atomic origin main refs/tags/<X.Y.Z>
-```
-
-- **Push rejected** (remote main moved, etc.): nothing was pushed —
-  `git fetch origin && git rebase origin/main`, re-run the Phase 1
-  gate, re-check the tag collision (the tag itself is still local and
-  reusable), then push again. If the upstream changes touch release
-  files, show the user before continuing.
-- **Clean-tree path** (Phase 2 step 6): main is already pushed and
-  current, so the push only carries the tag — the command above still
-  works (`main` is a no-op).
-
-Then watch the tag-triggered run. Expect **two** runs for the SHA: the
-`main` one has only its guard job (matrix skipped — that's the dedupe
-working) and the tag one runs the full matrix; watch the tag one:
-
-```sh
-gh run list --commit <SHA> --limit 5
-# → pick the run whose head_branch is the tag name; the main run's
-#   build job should show "skipped"
-gh run watch <RUN_ID> --exit-status --interval 30
-```
-
-`--exit-status` makes the watch exit non-zero if the run fails. Builds
-take 2–15 minutes (Windows legs are slow); the watch streams progress.
-
-- **Run fails:** identify the failing OS + step
-  (`gh run view <RUN_ID> --log-failed`), report it to the user, and
-  **stop** — no download, no release. Fix-forward with a new commit on
-  main (which does not re-trigger the tag; re-tag the new commit with a
-  patch bump after pushing it, e.g. a failed `0.3.0` ships as `0.3.1`).
-- **No run appears within a couple minutes:** the push may not have
-  landed or CI is queued — recheck with `gh run list --commit <SHA>`;
-  don't proceed on assumption.
-- The `main` run for the same commit is expected — its `guard` job
-  detects the tag and skips the matrix (that's the single-build dedupe;
-  if its matrix *ran*, the atomic push was split and the duplicate is
-  harmless but wasteful). PR-triggered runs only exist for PR commits —
-  pick the run whose `head_branch` equals the tag name.
-
-Verify the run actually produced all three artifacts before continuing
-(don't use `gh run view --json artifacts` — gh 2.102.1 rejects that
-field; the REST API works):
-
-```sh
-gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
-  --jq '.artifacts[] | "\(.name)\t\(.size_in_bytes)"'
-```
-
-Expect exactly: `faceit-tester-linux-amd64.zip`,
-`faceit-tester-windows-amd64.exe.zip`, `faceit-tester-macos.app.zip`,
-all with non-zero sizes. Missing artifact on a green run = packaging bug;
-stop and investigate.
+1. **Push main** (plain — nothing auto-builds):
+   ```sh
+   git push origin main
+   ```
+   - **Push rejected** (remote main moved, etc.): nothing is lost —
+     `git fetch origin && git rebase origin/main`, re-run the Phase 1
+     gate, then push again. If the upstream changes touch release files,
+     show the user before continuing.
+2. **Tag collision check** — if `<X.Y.Z>` exists locally (`git tag -l`)
+   or on the remote (`git ls-remote --tags origin`), ask the user for a
+   different version — do not delete or move existing tags. Checked now
+   so we don't build assets a tag can't use; the tag itself is only
+   created after the build is green (step 7).
+3. **Dispatch the build** on main with the version to stamp:
+   ```sh
+   gh workflow run .github/workflows/ci.yml -f version=<X.Y.Z>
+   ```
+   The run executes main's current head, and the input is
+   regex-validated in-workflow (`X.Y.Z` only), so a typo fails fast.
+4. **Find and watch the run:**
+   ```sh
+   sleep 5
+   gh run list --workflow ci.yml --event workflow_dispatch --limit 3
+   # → pick the newest run, then confirm it sits on the release SHA:
+   gh run view <RUN_ID> --json headSha --jq .headSha    # must equal <SHA>
+   gh run watch <RUN_ID> --exit-status --interval 30
+   ```
+   `--exit-status` makes the watch exit non-zero if the run fails.
+   Builds take 2–15 minutes (Windows legs are slow); the watch streams
+   progress. No run within a couple minutes → recheck the list; don't
+   proceed on assumption. headSha ≠ release SHA means main moved between
+   push and dispatch (shouldn't happen solo) — stop, re-sync, re-tag the
+   newer commit's release flow from Phase 2 step 3 onward.
+5. **Run fails:** identify the failing OS + step
+   (`gh run view <RUN_ID> --log-failed`), report it to the user, and
+   **stop** — no download, no tag, no release. Fix forward with a new
+   commit on main, push, and re-dispatch with the *same* version (no tag
+   exists yet, so the version is still free).
+6. **Verify the artifacts** before continuing (don't use
+   `gh run view --json artifacts` — gh 2.102.1 rejects that field; the
+   REST API works):
+   ```sh
+   gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
+     --jq '.artifacts[] | [.name, .size_in_bytes] | @tsv'
+   ```
+   Expect exactly: `faceit-tester-linux-amd64.zip`,
+   `faceit-tester-windows-amd64.exe.zip`, `faceit-tester-macos.app.zip`,
+   all with non-zero sizes. Missing artifact on a green run = packaging
+   bug; stop and investigate.
+7. **Tag the built commit.** Tags don't trigger CI anymore — this is a
+   pointer, and `gh release create --target` pins the release to the
+   same SHA regardless:
+   ```sh
+   git tag <X.Y.Z> <SHA>
+   git push origin refs/tags/<X.Y.Z>
+   ```
 
 ## Phase 4 — Download artifacts and publish
 
@@ -210,15 +199,15 @@ the retired date tags, so no install is stranded).
 ## Gotchas
 
 - **Never release from a red or unpushed tree.** Phase 1 and 2 gate
-  everything; the release tag must sit on the SHA of the green tag run.
-- Tag/title format is strictly semver `X.Y.Z`, zero `v` prefix. The tag
-  push *is* the build trigger — `--target` on `gh release create` pins
-  the release to the same commit the tag already points at, so the
-  release never drifts from its CI run.
-- The tag-triggered run is the one that ships: it stamps `version.go`
-  with the tag before compiling. Never publish artifacts from the
-  branch-push run of the same commit (those say `version = "dev"` and
-  would never update-check).
+  everything; the shipped binaries must come from the green dispatch run
+  sitting on the release SHA.
+- Tag/title format is strictly semver `X.Y.Z`, zero `v` prefix.
+- **The dispatch run is the one that ships:** its `version` input is
+  stamped into `version.go` before compiling. Never publish artifacts
+  from a pull-request run or any other unstamped build (those say
+  `version = "dev"` and would never update-check), and never dispatch
+  with a version other than the one the tag and release will use — the
+  stamped binary and the tag must agree.
 - The macOS artifact is a zipped `.app` *directory* (not a single
   file); the Windows artifact is the GUI-subsystem exe (`-H
   windowsgui`) zipped by CI. The updater needs these exact layouts —
@@ -233,9 +222,10 @@ the retired date tags, so no install is stranded).
   download binary bodies by redirecting stdout (`... > file.zip`), and
   sanity-check the byte size against the artifact's `size_in_bytes` so
   an error page doesn't get saved as a fake zip.
-- A failed tag run ships as a patch bump (`0.3.0` failed → tag `0.3.1`
-  on the fix commit); never move or delete a published tag.
-- This skill commits, tags, and pushes by design, but only after the
-  user confirms the commit + version in Phase 2 — and publishes only
-  after the Phase 4 confirmation. Nothing public happens without those
-  two yeses.
+- **A failed run costs nothing but time:** no tag exists until the
+  build is green, so fix forward and re-dispatch the *same* version.
+  Never move or delete a published tag.
+- This skill commits, pushes, dispatches, tags, and publishes by design,
+  but only after the user confirms the commit + version in Phase 2 — and
+  publishes only after the Phase 4 confirmation. Nothing public happens
+  without those two yeses.
