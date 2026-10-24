@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Server is one testable endpoint. City roughly matches a FACEIT location;
@@ -182,42 +181,11 @@ func groupByCity(servers []Server) []CityGroup {
 	return groups
 }
 
-// loadServers returns the embedded server lists, overridden by servers.json
-// next to the executable (or cwd) if present and valid. A JSON file replaces
-// the embedded lists entirely.
-func loadServers() map[string][]Server {
-	if override, err := loadServersJSON(); err == nil && override != nil {
-		return override
-	}
-	return embeddedServers
-}
-
-func loadServersJSON() (map[string][]Server, error) {
-	candidates := []string{"servers.json"}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append([]string{filepath.Join(filepath.Dir(exe), "servers.json")}, candidates...)
-	}
-	for _, path := range candidates {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		servers, err := parseServersJSON(data)
-		if err != nil {
-			return nil, err
-		}
-		if servers != nil {
-			return servers, nil
-		}
-	}
-	return nil, nil
-}
-
-// parseServersJSON decodes an override file. It has full parity with the
-// embedded table: entries carry city/provider/host plus optional max_pps,
-// probe_size, and scrubbed fields. It returns (nil, nil) for an empty
-// document (treated as no override) and an error for incomplete or
-// out-of-range entries.
+// parseServersJSON decodes a serialized server list (the custom list
+// stored in preferences). It has full parity with the embedded table:
+// entries carry city/provider/host plus optional max_pps, probe_size, and
+// scrubbed fields. It returns (nil, nil) for an empty document (treated
+// as no override) and an error for invalid entries.
 func parseServersJSON(data []byte) (map[string][]Server, error) {
 	var servers map[string][]Server
 	if err := json.Unmarshal(data, &servers); err != nil {
@@ -226,35 +194,67 @@ func parseServersJSON(data []byte) (map[string][]Server, error) {
 	if len(servers) == 0 {
 		return nil, nil
 	}
-	for region, list := range servers {
-		for i, s := range list {
-			if s.City == "" || s.Provider == "" || s.Host == "" {
-				return nil, fmt.Errorf("%s[%d]: entry missing city, provider, or host", region, i)
-			}
-			if s.MaxPPS < 0 {
-				return nil, fmt.Errorf("%s/%s: max_pps must be >= 0", s.City, s.Provider)
-			}
-			if s.ProbeSize < 0 {
-				return nil, fmt.Errorf("%s/%s: probe_size must be >= 0", s.City, s.Provider)
-			}
-		}
+	if err := validateServers(servers); err != nil {
+		return nil, err
 	}
 	return servers, nil
 }
 
+// validateServers checks a whole table for the invariants parseServersJSON
+// and the editor's Apply both rely on: non-empty city/provider/host, no
+// "/" in region or city names (it separates tree-node keys in prefs), no
+// negative probe overrides, and at most one server per City.Provider
+// within a region (IDs would collide in the selection state).
+func validateServers(servers map[string][]Server) error {
+	for region, list := range servers {
+		if region == "" {
+			return fmt.Errorf("region name must not be empty")
+		}
+		if strings.Contains(region, "/") {
+			return fmt.Errorf("region %q must not contain %q", region, "/")
+		}
+		seen := make(map[string]bool, len(list))
+		for i, s := range list {
+			if s.City == "" || s.Provider == "" || s.Host == "" {
+				return fmt.Errorf("%s[%d]: entry missing city, provider, or host", region, i)
+			}
+			if strings.Contains(s.City, "/") {
+				return fmt.Errorf("%s[%d]: city %q must not contain %q", region, i, s.City, "/")
+			}
+			if s.MaxPPS < 0 {
+				return fmt.Errorf("%s/%s: max_pps must be >= 0", s.City, s.Provider)
+			}
+			if s.ProbeSize < 0 {
+				return fmt.Errorf("%s/%s: probe_size must be >= 0", s.City, s.Provider)
+			}
+			if seen[s.ID()] {
+				return fmt.Errorf("%s: duplicate server %s", region, s.ID())
+			}
+			seen[s.ID()] = true
+		}
+	}
+	return nil
+}
+
 // regionNames returns regions to show: RegionOrder first, then any extra
-// regions found only in an override file (sorted for stability).
+// regions found only in a custom list (sorted for stability).
 func regionNames(servers map[string][]Server) []string {
+	return orderedRegions(servers)
+}
+
+// orderedRegions is regionNames for any region-keyed table, so the
+// editor's edit-row view orders regions identically without parsing.
+func orderedRegions[T any](regions map[string]T) []string {
 	seen := make(map[string]bool, len(RegionOrder))
 	var names []string
 	for _, r := range RegionOrder {
-		if _, ok := servers[r]; ok {
+		if _, ok := regions[r]; ok {
 			names = append(names, r)
 			seen[r] = true
 		}
 	}
 	var extra []string
-	for r := range servers {
+	for r := range regions {
 		if !seen[r] {
 			extra = append(extra, r)
 		}
@@ -263,12 +263,11 @@ func regionNames(servers map[string][]Server) []string {
 	return append(names, extra...)
 }
 
-// dumpServersJSON writes servers in the same shape parseServersJSON accepts,
-// so the output can be saved as servers.json and reloaded as a full override.
-// Regions are ordered RegionOrder-first (extras sorted) to match the embedded
-// table layout; entries keep their in-list order. Intended for the
-// dump-then-surgically-edit workflow: dumping rather than hand-writing the
-// file avoids recreating the whole table when one server changes.
+// dumpServersJSON writes servers in the same shape parseServersJSON
+// accepts. This is how a custom list is serialized into preferences (and
+// what the round-trip test pins). Regions are ordered RegionOrder-first
+// (extras sorted) to match the embedded table layout; entries keep their
+// in-list order.
 func dumpServersJSON(w io.Writer, servers map[string][]Server) error {
 	if _, err := io.WriteString(w, "{\n"); err != nil {
 		return err

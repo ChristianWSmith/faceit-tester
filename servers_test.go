@@ -227,7 +227,7 @@ func TestServerListMatchesFindings(t *testing.T) {
 }
 
 func TestParseServersJSONParity(t *testing.T) {
-	// Override files carry the same fields as the embedded table.
+	// The stored custom list carries the same fields as the embedded table.
 	data := []byte(`{
 		"EU": [
 			{"city": "UK", "provider": "OVH", "host": "198.244.202.178", "max_pps": 9},
@@ -278,8 +278,8 @@ func TestParseServersJSONParity(t *testing.T) {
 }
 
 func TestDumpServersJSONRoundTrip(t *testing.T) {
-	// The dump must be loadable by parseServersJSON (full override parity)
-	// and losslessly reproduce the source table.
+	// The dump must be loadable by parseServersJSON (full custom-list
+	// parity) and losslessly reproduce the source table.
 	var buf bytes.Buffer
 	if err := dumpServersJSON(&buf, embeddedServers); err != nil {
 		t.Fatalf("dumpServersJSON: %v", err)
@@ -303,8 +303,8 @@ func TestDumpServersJSONRoundTrip(t *testing.T) {
 		t.Error("dumped region order should list NA before EU")
 	}
 
-	// A dumped file with one surgical edit still loads (the primary
-	// dump-and-edit workflow).
+	// A dumped table with one surgical edit still loads (the serializer
+	// must keep accepting hand-shaped documents).
 	edited := strings.Replace(text, "167.160.91.2", "10.0.0.9", 1)
 	servers, err := parseServersJSON([]byte(edited))
 	if err != nil {

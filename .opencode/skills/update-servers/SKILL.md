@@ -302,8 +302,10 @@ commit** — the user reviews and commits.
 - HiperZ label geography can lie (a "singapore" label pointed at a Psychz
   *Australian* IP). Trust RDAP country over the label when they disagree,
   and note it in the report.
-- `servers.json` next to the exe replaces the whole list at runtime, but
-  this skill edits the **embedded** table — the shipped default. Don't
-  create a `servers.json` as part of this workflow.
+- A custom server list lives in app preferences (`servers_override`) and
+  replaces the whole list at runtime, but this skill edits the
+  **embedded** table — the shipped default. Don't create or enable a
+  custom list as part of this workflow (and if one is active when
+  comparing live behavior, Drop Custom List first in the app).
 - The zips and extracted files match `hiperz_test*` in `.gitignore`; the
   temp `zz_*_test.go` harnesses must be deleted, not committed.

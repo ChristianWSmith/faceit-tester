@@ -11,6 +11,11 @@ const (
 	// dialog's "Never" button; when true the startup update check is
 	// skipped (a forced --force-update-check still runs it).
 	prefsUpdatesDisabledKey = "updates_disabled"
+	// prefsServersOverrideKey is the Preferences key holding the custom
+	// server list as JSON (the same shape dumpServersJSON writes). Absent
+	// or empty means the embedded built-ins are in effect; the key is
+	// removed whenever the list comes to match the built-ins again.
+	prefsServersOverrideKey = "servers_override"
 )
 
 // aggregate reports whether every child is checked (all) and whether at
@@ -56,7 +61,7 @@ func aggregateCities(cities []CityState) (all, some bool) {
 // stateFromDisabled builds the server-ID → checked map for the active server
 // set, defaulting every server to checked and clearing only IDs that both
 // appear in disabled and exist in servers. Unknown disabled IDs (from a
-// deleted override file, older versions, etc.) are silently ignored.
+// dropped custom list, older versions, etc.) are silently ignored.
 func stateFromDisabled(servers map[string][]Server, disabled []string) map[string]bool {
 	state := make(map[string]bool)
 	for _, regionServers := range servers {
@@ -92,15 +97,15 @@ func regionNodeKey(region string) string {
 }
 
 // cityNodeKey is the prefs key for an expanded city node. "/" cannot appear
-// in region or city names in the embedded data; override authors should
-// avoid it (unknown keys are ignored on load regardless).
+// in region or city names — validateServers rejects it in custom lists —
+// and unknown keys are ignored on load regardless.
 func cityNodeKey(region, city string) string {
 	return region + "/" + city
 }
 
 // expandedFromList builds the set of expanded tree nodes from the persisted
 // list, keeping only keys present in the active server set. Stale keys (from
-// a deleted override, older versions, etc.) are silently ignored; an
+// a dropped custom list, older versions, etc.) are silently ignored; an
 // empty/absent list means everything starts collapsed.
 func expandedFromList(servers map[string][]Server, list []string) map[string]bool {
 	valid := make(map[string]bool)

@@ -77,25 +77,30 @@ sections are saved when you close the app.
 
 ## Custom server lists
 
-The quickest way to customize is **Dump Server Info** (in the actions
-drawer — the up-arrow button next to Test): it saves the currently loaded
-server table, exactly as the app sees it, to a `servers.json` you can edit.
-Change a host, add a server, delete one, and place the file next to the
-executable to replace the built-in lists entirely.
+**Edit Servers** (in the actions drawer — the up-arrow button next to
+Test) opens the built-in list for customization. Pick a server on the
+left; edit its city, provider, host, and probe overrides on the right.
+**+** next to a city adds a server to it; **Delete Server** removes the
+selected one.
 
-Same city/provider/host schema, plus optional per-server probe
-overrides: `max_pps` (cap the send rate, e.g. under a policer),
-`probe_size` (smaller ICMP payload for providers that filter large echo
-packets), and `scrubbed` (loss/jitter are unmeasurable through a DDoS
-scrubber — report ping only):
+Nothing changes until you press **Apply**, which stores the entire list
+as your custom server list — the first edit starts from the built-ins,
+so your copy is always complete. Applying a list that matches the
+built-ins, or pressing **Drop Custom List**, returns the app to the
+built-ins. Cancel discards every unsaved edit (including deletes). The
+custom list lives in the app's preferences alongside your selections —
+not next to the executable — so it survives updates. Power users can
+find it as the `servers_override` key in the same preferences file the
+`updates_disabled` key lives in.
 
-```json
-{
-  "NA": [
-    { "city": "Chicago", "provider": "Psychz Networks", "host": "108.181.62.197" }
-  ]
-}
-```
+Per-server probe overrides, exposed in the editor as fields:
+
+- **Max PPS** — cap the send rate for providers with a known ICMP
+  policer (blank = default 64 pps).
+- **Probe size** — smaller ICMP payload for providers that filter large
+  echo packets (blank = default 600 bytes).
+- **Scrubbed** — loss/jitter are unmeasurable through a DDoS scrubber;
+  report ping only.
 
 ## Auto-updates
 

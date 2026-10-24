@@ -99,6 +99,15 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   after-first-render hook in Fyne to use instead. Skipped when unelevated
   or the spec is invalid; the selection persists on close like any manual
   change.
+- **`app.NewWithID` runs before the elevation check, prefs reads before
+  `ShowAndRun`.** `--test` validation needs the server list, which now
+  lives in preferences, so `main()` creates the app + reads
+  `servers_override` pre-UAC (harmless — creating the app opens no
+  window). Preference *writes* before `ShowAndRun` would block on
+  `fyne.DoAndWait`, so the only pre-Run interaction is reads; every write
+  (editor Apply/Drop, close-intercept saves) happens inside the event
+  loop. Don't move `loadServers` back after elevation without also moving
+  spec validation, and don't write prefs from startup code.
 - **Per-server ICMP policers exist; measure them with rate curves.** Some
   providers (OVH fleet, Moscow PS, BA Latitude.sh) answer ICMP
   at a fixed token quota regardless of send rate — a *limiter* keeps the
@@ -162,13 +171,32 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   Dedicated.com/ReliableSite/NForce, maxi→Latitude.sh, etc.). Eight dead
   endpoints were removed and Chicago.NFOservers moved to NFO's current
   example IP (74.91.113.173, ProbeSize 56 — HiperZ's IP was retired) per
-  `PACKET_LOSS_FINDINGS.md`. `servers.json` next to the exe replaces the
-  lists entirely; same city/provider/host schema plus optional
-  `max_pps`/`probe_size`/`scrubbed`, validated by `parseServersJSON`.
-  `dumpServersJSON` writes the loaded table (embedded or override) back
-  out in the same schema, NA-first region order, for the
-  dump-then-surgically-edit workflow — round-trip tested by
-  `TestDumpServersJSONRoundTrip`.
+  `PACKET_LOSS_FINDINGS.md`. The custom list (schema: same
+  city/provider/host plus optional `max_pps`/`probe_size`/`scrubbed`)
+  lives in app preferences under `servers_override` — there is no
+  servers.json-next-to-the-exe anymore. `parseServersJSON` +
+  `validateServers` gate the stored blob (non-empty fields, no `/` in
+  region/city — prefs tree keys — no duplicate City.Provider, no
+  negative probe overrides); `dumpServersJSON` serializes a table back
+  into that schema, NA-first region order, and `loadServers` returns the
+  stored list or the built-ins (always a usable table; a malformed blob
+  comes back as an error *and* the built-ins so the UI can surface it).
+  Round-trip tested by `TestDumpServersJSONRoundTrip`.
+- `override.go` — the custom-list persistence surface: `loadServers`,
+  `saveOverride` (a table equal to `embeddedServers` *removes* the key so
+  "custom list active" stays exact), `dropOverride`, `overrideActive`,
+  `cloneServers` (editors must clone — the returned table may alias the
+  built-ins). `prefs.go` holds the `servers_override` key constant.
+- `editor.go` — the Edit Servers dialog (per-server form + region → city
+  → server list). Works on an `editRow` copy (numeric fields stay raw
+  strings until Apply; `nonNegativeInt` validators mark bad input),
+  write-through on every keystroke (no pending-flush on navigation), and
+  nothing touches prefs until Apply. First open clones the *effective*
+  table, so the first Apply always stores a complete baseline + edits;
+  Cancel (or the dialog's close) discards everything — it's also the
+  undo for deletes. `applyServerTable` in main.go swaps the live table:
+  rebuilds the tree into `treeHolder`, re-derives state/expansion
+  against the new IDs, and clears results.
 - `prefs.go` — pure, unit-tested state logic. Persistence is a *denylist*
   of unchecked server IDs (`disabled_servers`) plus an allowlist of
   expanded tree nodes (`expanded_nodes`). Only IDs present in the active
@@ -203,7 +231,7 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   auto-sizes to the widest name cell (`nameColumnWidth` +
   `rebuildHeader`). Tap a parent row to collapse/expand it. All UI
   updates from the runner goroutine go through `fyne.Do`.
-- Secondary actions (Export CSV, Dump Server Info, Identify) live in a
+- Secondary actions (Export CSV, Edit Servers, Identify) live in a
   floating drawer above the button row: `widget.NewStack(main, drawerLayer)`
   where the drawer is a tap-catcher + right-aligned vertical button column
   on an overlay-colored backdrop panel. The arrow button toggles it and

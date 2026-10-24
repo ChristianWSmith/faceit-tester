@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"fyne.io/fyne/v2/test"
 )
 
 func TestLivePingSmoke(t *testing.T) {
@@ -97,7 +99,11 @@ func TestLiveIdentifyRDAP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	res := identifyTarget(ctx, "connect 107.155.84.58:27015;", loadServers())
+	servers, err := loadServers(test.NewApp().Preferences())
+	if err != nil {
+		t.Fatalf("loadServers: %v", err)
+	}
+	res := identifyTarget(ctx, "connect 107.155.84.58:27015;", servers)
 	if res.Err != nil {
 		t.Fatalf("identify error: %v", res.Err)
 	}

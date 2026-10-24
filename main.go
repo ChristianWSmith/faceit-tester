@@ -68,10 +68,11 @@ type ui struct {
 	prefs  fyne.Preferences
 
 	checksScroll *container.Scroll
+	treeHolder   *fyne.Container // wraps checksScroll so the tree can be rebuilt in place
 	testBtn      *widget.Button
 	restartBtn   *widget.Button
 	exportBtn    *widget.Button
-	dumpBtn      *widget.Button
+	editBtn      *widget.Button
 	identifyBtn  *widget.Button
 	drawerBtn    *widget.Button  // toggles the secondary-actions drawer
 	drawerLayer  *fyne.Container // floating drawer: catcher + action column
@@ -135,15 +136,24 @@ pending release.
 	}
 	flag.Parse()
 
+	// Sweep "<exe>.old" / "*.app.old" trash left by a previous self-update
+	// before anything else touches the install directory. Best-effort.
+	cleanupOlds()
+
+	// The app object must exist before the elevation check: --test is
+	// validated against the server list, and the custom list now lives in
+	// app preferences. Creating the app and reading prefs needs no event
+	// loop and writes nothing (a Set* before ShowAndRun would block on
+	// fyne.DoAndWait), so this is safe pre-UAC and pre-Run.
+	a := app.NewWithID(appID)
+
 	// Validate --test before the elevation prompt so a bad spec fails
 	// fast on the terminal instead of after a pointless UAC round-trip.
 	// Errors also reach the status label once the window is up (stderr
 	// writes are silent no-ops in the windowsgui build, which has no
 	// console handles).
-	servers := loadServers()
-	// Sweep "<exe>.old" / "*.app.old" trash left by a previous self-update
-	// before anything else touches the install directory. Best-effort.
-	cleanupOlds()
+	prefs := a.Preferences()
+	servers, overrideErr := loadServers(prefs)
 	var (
 		specErr error
 		sel     map[string]bool
@@ -172,12 +182,10 @@ pending release.
 		}
 	}
 
-	a := app.NewWithID(appID)
 	a.SetIcon(fyne.NewStaticResource("icon.png", iconData))
 	w := a.NewWindow("FACEIT Connection Tester")
 	w.Resize(fyne.NewSize(960, 600))
 
-	prefs := a.Preferences()
 	regionBy := map[string]string{}
 	for region, srvs := range servers {
 		for _, s := range srvs {
@@ -214,6 +222,16 @@ pending release.
 			// after the user restarts elevated.
 			u.statusLabel.SetText("Testing needs administrator rights — Restart as Admin will run the queued test automatically.")
 		}
+	}
+	// Custom-list status, in priority order behind an invalid --test
+	// spec: a broken stored list beats the queued-test/elevation notes
+	// (it silently changed what would be tested), while a merely active
+	// custom list is only worth a note when testing is available.
+	if specErr == nil && overrideErr != nil {
+		u.statusLabel.SetText("Custom server list is invalid — using built-ins: " + overrideErr.Error() +
+			"  (Edit Servers in the actions drawer to fix or drop it.)")
+	} else if specErr == nil && isElevated() && overrideActive(prefs) {
+		u.statusLabel.SetText("Custom server list active — Edit Servers in the actions drawer to change or drop it.")
 	}
 	w.SetContent(u.content())
 	// Persist selection + expansion once on exit: writing prefs on every
@@ -404,10 +422,10 @@ func (u *ui) build() {
 	u.exportBtn = widget.NewButtonWithIcon("Export CSV", theme.DocumentSaveIcon(), u.onExportTap)
 	u.exportBtn.Disable()
 
-	// Dumps the loaded server table (embedded or override) as servers.json
-	// so users can make surgical edits instead of hand-writing the whole
-	// file from scratch.
-	u.dumpBtn = widget.NewButtonWithIcon("Dump Server Info", theme.DocumentCreateIcon(), u.onDumpTap)
+	// Opens the custom-list editor (editor.go): per-server form on the
+	// left-pane selection, Apply persists to prefs, Drop restores the
+	// built-ins. Disabled while a run is in flight (setRunning).
+	u.editBtn = widget.NewButtonWithIcon("Edit Servers", theme.DocumentCreateIcon(), u.onEditTap)
 
 	u.identifyBtn = widget.NewButtonWithIcon("Identify", theme.SearchIcon(), u.onIdentifyTap)
 
@@ -443,13 +461,17 @@ func (u *ui) content() fyne.CanvasObject {
 		u.headerRow, nil, nil, nil, u.table,
 	)
 
-	// Tree left, results right; draggable divider.
-	split := container.NewHSplit(container.NewPadded(u.checksScroll), tableArea)
+	// Tree left, results right; draggable divider. The tree sits in a
+	// stack holder so applyServerTable can swap in a rebuilt tree without
+	// recreating the whole window content (which would reset the split
+	// offset and drawer state).
+	u.treeHolder = container.NewStack(container.NewPadded(u.checksScroll))
+	split := container.NewHSplit(u.treeHolder, tableArea)
 	split.Offset = 0.35
 
 	// Status fills the center (room for long progress messages); actions
 	// sit in the right slot so label and buttons share one vertical band.
-	// Secondary actions (export/dump/identify) float in a drawer above
+	// Secondary actions (export/edit/identify) float in a drawer above
 	// the arrow button rather than taking inline space — the bottom-right
 	// corner was getting crowded.
 	bottom := container.NewBorder(nil, nil, nil,
@@ -465,7 +487,7 @@ func (u *ui) content() fyne.CanvasObject {
 	// uses for popups) so the drawer reads as a container, not loose
 	// floating controls.
 	catcher := newTapCatcher(u.hideDrawer)
-	actions := container.NewPadded(container.NewVBox(u.exportBtn, u.dumpBtn, u.identifyBtn))
+	actions := container.NewPadded(container.NewVBox(u.exportBtn, u.editBtn, u.identifyBtn))
 	backdrop := canvas.NewRectangle(theme.Color(theme.ColorNameOverlayBackground))
 	backdrop.CornerRadius = theme.Size(theme.SizeNamePopupRadius)
 	panel := container.NewStack(backdrop, actions)
@@ -744,6 +766,39 @@ func (u *ui) saveAllPrefs() {
 	u.prefs.SetStringList(prefsExpandedKey, expandedToList(u.servers, u.expanded))
 }
 
+// applyServerTable swaps in a new server table (Apply or Drop in the
+// editor): rebuilds the selection tree, re-derives selection and
+// expansion against the new ID set, and clears results — old rows would
+// reference servers that no longer exist. Callers must already have
+// persisted the table; this only updates the live session.
+func (u *ui) applyServerTable(servers map[string][]Server, status string) {
+	u.servers = servers
+	u.regionBy = map[string]string{}
+	for region, srvs := range servers {
+		for _, s := range srvs {
+			u.regionBy[s.ID()] = region
+		}
+	}
+	// Both persisted lists are active-table-relative: unknown IDs/keys
+	// are ignored on load and pruned on save, so surviving checkboxes and
+	// expansions carry over and new servers default to checked/collapsed.
+	u.state = stateFromDisabled(u.servers, u.prefs.StringList(prefsDisabledKey))
+	u.expanded = expandedFromList(u.servers, expandedToList(u.servers, u.expanded))
+
+	u.allChecks = nil
+	u.allExpanders = nil
+	u.checksScroll = container.NewVScroll(u.buildTree())
+	u.treeHolder.RemoveAll()
+	u.treeHolder.Add(container.NewPadded(u.checksScroll))
+
+	u.tree = newResultsTree()
+	u.rows = nil
+	u.results = nil
+	u.refreshTableLayout()
+	u.exportBtn.Disable()
+	u.statusLabel.SetText(status)
+}
+
 // selectedServers returns checked servers across all regions in
 // RegionOrder (then override-extra) order.
 func (u *ui) selectedServers() []Server {
@@ -880,31 +935,6 @@ func (u *ui) onExportTap() {
 	d.Show()
 }
 
-// onDumpTap writes the loaded server table (embedded or override) to a
-// user-chosen servers.json. The file replaces the lists entirely on next
-// launch, so the dumped copy is meant as a starting point for surgical
-// edits (e.g. one provider's host changed) rather than a from-scratch
-// rewrite.
-func (u *ui) onDumpTap() {
-	d := dialog.NewFileSave(func(closer fyne.URIWriteCloser, err error) {
-		if err != nil {
-			u.statusLabel.SetText("Dump failed: " + err.Error())
-			return
-		}
-		if closer == nil {
-			return // user cancelled
-		}
-		defer closer.Close()
-		if writeErr := dumpServersJSON(closer, u.servers); writeErr != nil {
-			u.statusLabel.SetText("Dump failed: " + writeErr.Error())
-			return
-		}
-		u.statusLabel.SetText("Dumped server list to JSON (servers.json next to the exe overrides the built-ins).")
-	}, u.window)
-	d.SetFileName("servers.json")
-	d.Show()
-}
-
 func (u *ui) setRunning(running bool) {
 	u.running = running
 	if running {
@@ -914,6 +944,7 @@ func (u *ui) setRunning(running bool) {
 		u.testBtn.SetText("Cancel")
 		u.testBtn.Enable()
 		u.exportBtn.Disable()
+		u.editBtn.Disable() // the table can't swap under a live run
 	} else {
 		u.testBtn.Importance = widget.SuccessImportance // green = start
 		u.testBtn.SetText("Test")
@@ -923,6 +954,7 @@ func (u *ui) setRunning(running bool) {
 		if len(u.results) > 0 {
 			u.exportBtn.Enable()
 		}
+		u.editBtn.Enable()
 	}
 	for _, chk := range u.allChecks {
 		if running {
