@@ -2,5 +2,5 @@
   Icon = "icon.png"
   Name = "faceit-tester"
   ID = "com.christianws.faceit-tester"
-  Version = "1.0.0"
+  Version = "1.0.1"
   Build = 1

@@ -248,6 +248,93 @@ func TestExtractZipAbsolutePathRejected(t *testing.T) {
 	}
 }
 
+// TestStagePayloadPublishedLayouts pins staging to each platform's
+// published zip layout (the exact entries CI produces) so a mismatch
+// fails here instead of in an installed user's update. The windows case
+// is a regression that shipped in 0.2.0–1.0.0: staging shared the
+// extensionless linux name, so every Windows self-update died with
+// "archive does not contain faceit-tester" even though the zip's single
+// entry is faceit-tester.exe.
+func TestStagePayloadPublishedLayouts(t *testing.T) {
+	tests := []struct {
+		goos      string
+		entries   map[string]string
+		wantBin   string
+		wantBytes string // "" = expect a directory (darwin bundle)
+	}{
+		{"windows", map[string]string{
+			"faceit-tester.exe": "win-binary",
+		}, "faceit-tester.exe", "win-binary"},
+		{"linux", map[string]string{
+			"faceit-tester/usr/local/bin/faceit-tester": "linux-binary",
+			"faceit-tester/Makefile":                    "all:",
+		}, "faceit-tester", "linux-binary"},
+		{"darwin", map[string]string{
+			"faceit-tester-macos.app/Contents/MacOS/faceit-tester": "mac-binary",
+			"faceit-tester-macos.app/Contents/Info.plist":          "<plist/>",
+		}, "faceit-tester", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "asset.zip")
+			writeTestZip(t, zipPath, tt.entries)
+			extract := filepath.Join(dir, "extracted")
+			stage := filepath.Join(dir, "stage")
+			for _, d := range []string{extract, stage} {
+				if err := os.MkdirAll(d, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := extractZip(zipPath, extract); err != nil {
+				t.Fatal(err)
+			}
+			got, err := stagePayloadFor(tt.goos, extract, stage)
+			if err != nil {
+				t.Fatalf("stagePayloadFor(%s): %v", tt.goos, err)
+			}
+			if got != tt.wantBin {
+				t.Errorf("returned %q, want %q", got, tt.wantBin)
+			}
+			if tt.wantBytes == "" {
+				// darwin: the returned name is logical; the staged
+				// payload is the bundle directory itself.
+				if fi, err := os.Stat(filepath.Join(stage, "faceit-tester-macos.app")); err != nil || !fi.IsDir() {
+					t.Errorf("staged .app bundle missing: %v", err)
+				}
+				return
+			}
+			gotBytes, err := os.ReadFile(filepath.Join(stage, tt.wantBin))
+			if err != nil {
+				t.Fatalf("staged binary: %v", err)
+			}
+			if string(gotBytes) != tt.wantBytes {
+				t.Errorf("staged content = %q, want %q", gotBytes, tt.wantBytes)
+			}
+		})
+	}
+
+	// The 0.2.0–1.0.0 bug: a windows-labeled update whose payload lacks
+	// faceit-tester.exe must fail loudly, not stage the wrong file.
+	t.Run("windows rejects extensionless payload", func(t *testing.T) {
+		dir := t.TempDir()
+		extract := filepath.Join(dir, "extracted")
+		stage := filepath.Join(dir, "stage")
+		for _, d := range []string{extract, stage} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(extract, "faceit-tester"), []byte("linux-binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := stagePayloadFor("windows", extract, stage)
+		if err == nil || !strings.Contains(err.Error(), "faceit-tester.exe") {
+			t.Fatalf("err = %v, want missing faceit-tester.exe", err)
+		}
+	})
+}
+
 func TestFindFile(t *testing.T) {
 	dir := t.TempDir()
 	nested := filepath.Join(dir, "faceit-tester", "usr", "local", "bin")

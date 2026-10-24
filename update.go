@@ -246,25 +246,26 @@ func applyUpdate(ctx context.Context, client *http.Client, rel releaseInfo, prog
 
 // stagePayload copies the executable payload out of the extracted archive
 // into stageDir and returns the binary's file name (the name
-// replaceAndRelaunch installs). Per-platform archive layouts:
-//   - windows: bare faceit-tester-windows-amd64.exe at the zip root
+// replaceAndRelaunch installs). Per-platform archive layouts (pinned by
+// TestStagePayloadPublishedLayouts):
+//   - windows: bare faceit-tester.exe at the zip root
 //   - linux: faceit-tester/ tree containing usr/local/bin/faceit-tester
 //   - darwin: faceit-tester-macos.app/ bundle at the zip root
 func stagePayload(extractDir, stageDir string) (string, error) {
-	switch runtime.GOOS {
-	case "windows", "linux":
-		const binaryName = "faceit-tester"
-		src, ok := findFile(extractDir, binaryName)
-		if !ok {
-			return "", fmt.Errorf("archive does not contain %s", binaryName)
-		}
-		if err := copyFile(src, filepath.Join(stageDir, binaryName)); err != nil {
-			return "", err
-		}
-		if err := setExecutable(filepath.Join(stageDir, binaryName)); err != nil {
-			return "", err
-		}
-		return binaryName, nil
+	return stagePayloadFor(runtime.GOOS, extractDir, stageDir)
+}
+
+// stagePayloadFor is stagePayload with an explicit GOOS so tests can pin
+// every platform's published zip layout from any host. The windows leg
+// must look for faceit-tester.exe — sharing the extensionless linux name
+// there made every Windows self-update fail with "archive does not
+// contain faceit-tester" (0.2.0 → 1.0.0).
+func stagePayloadFor(goos, extractDir, stageDir string) (string, error) {
+	switch goos {
+	case "windows":
+		return stageBinary(extractDir, stageDir, "faceit-tester.exe")
+	case "linux":
+		return stageBinary(extractDir, stageDir, "faceit-tester")
 	case "darwin":
 		app := findAppBundle(extractDir)
 		if app == "" {
@@ -279,6 +280,22 @@ func stagePayload(extractDir, stageDir string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported platform")
 	}
+}
+
+// stageBinary finds binaryName anywhere under extractDir, copies it into
+// stageDir under the same name, and returns that name.
+func stageBinary(extractDir, stageDir, binaryName string) (string, error) {
+	src, ok := findFile(extractDir, binaryName)
+	if !ok {
+		return "", fmt.Errorf("archive does not contain %s", binaryName)
+	}
+	if err := copyFile(src, filepath.Join(stageDir, binaryName)); err != nil {
+		return "", err
+	}
+	if err := setExecutable(filepath.Join(stageDir, binaryName)); err != nil {
+		return "", err
+	}
+	return binaryName, nil
 }
 
 func copyFile(src, dst string) error {

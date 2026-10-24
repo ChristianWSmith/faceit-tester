@@ -148,9 +148,14 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   flag suppresses the prompt entirely — automation must never block on a
   modal. Download + extraction is stdlib-only (`archive/zip` with zip-slip
   rejection); CI re-packs Linux's tar.xz as a zip so no xz library is
-  needed anywhere. When CI's packaging or asset names change, update
+   needed anywhere. When CI's packaging or asset names change, update
   `updateAssetName` + `stagePayload` in `update.go` and their tests in the
-  same commit.
+  same commit; the per-platform zip layouts (windows = bare
+  `faceit-tester.exe`, linux = `faceit-tester/` tree, darwin = `.app`)
+  are pinned by `TestStagePayloadPublishedLayouts`. Note: 0.2.0–1.0.0
+  Windows builds can never self-update — staging looked for the
+  extensionless `faceit-tester` instead of `faceit-tester.exe` (fixed in
+  1.0.1), so those installs need a one-time manual download.
 - **Releases are semver-tag-first** (`.opencode/skills/release/SKILL.md`):
   commit → tag `X.Y.Z` → one atomic push of main+tag → the tag push
   triggers the build that stamps the version → release is created from
