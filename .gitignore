@@ -44,3 +44,6 @@ go.work.sum
 PACKET_LOSS_FINDINGS.md
 .opencode/*
 !.opencode/skills/
+
+# Update-relic trash from rename-first self-update (cleanupOlds sweeps at startup)
+*.old
