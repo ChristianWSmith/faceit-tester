@@ -15,13 +15,14 @@ type ServerOutcome struct {
 }
 
 // runTests probes each server sequentially for probeWindow each, honoring
-// ctx cancellation. onStatus is called before each server starts;
-// onTick reports live counts for the current server; onDone delivers each
-// finished result. Callbacks may be invoked from a background goroutine.
+// ctx cancellation. onStatus is called before each server starts (with the
+// server itself so callers can key UI state by ID); onTick reports live
+// counts for the current server; onDone delivers each finished result.
+// Callbacks may be invoked from a background goroutine.
 func runTests(
 	ctx context.Context,
 	servers []Server,
-	onStatus func(name string, index, total int),
+	onStatus func(s Server, index, total int),
 	onTick func(sent, recv int),
 	onDone func(outcome ServerOutcome),
 ) {
@@ -30,7 +31,7 @@ func runTests(
 		if ctx.Err() != nil {
 			return
 		}
-		onStatus(srv.DisplayName(), i+1, total)
+		onStatus(srv, i+1, total)
 
 		// Full budget: probeWindow for sending (bounded by the paced
 		// probe count), then replyGrace of receive-only time for

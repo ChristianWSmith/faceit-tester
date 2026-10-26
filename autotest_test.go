@@ -196,6 +196,9 @@ func TestParseTestSpecErrors(t *testing.T) {
 }
 
 func TestExpansionForSelection(t *testing.T) {
+	// Regions expand so the selection's tri-state city rows are visible;
+	// cities stay collapsed — providers are a power-user detail (players
+	// pick a location, not a provider).
 	state, err := parseTestSpec(embeddedServers, `{"NA":{"Virginia":"Datacamp"}}`)
 	if err != nil {
 		t.Fatal(err)
@@ -204,11 +207,11 @@ func TestExpansionForSelection(t *testing.T) {
 	if !keys["NA"] {
 		t.Error("region NA should be expanded")
 	}
-	if !keys["NA/Virginia"] {
-		t.Error("city NA/Virginia should be expanded")
+	if keys["NA/Virginia"] {
+		t.Error("city NA/Virginia should stay collapsed")
 	}
-	if len(keys) != 2 {
-		t.Errorf("keys = %v, want exactly NA and NA/Virginia", keys)
+	if len(keys) != 1 {
+		t.Errorf("keys = %v, want exactly NA", keys)
 	}
 }
 

@@ -16,6 +16,12 @@ const (
 	// or empty means the embedded built-ins are in effect; the key is
 	// removed whenever the list comes to match the built-ins again.
 	prefsServersOverrideKey = "servers_override"
+	// Window geometry, saved once on close. Width/height are content
+	// pixels; split_offset is the HSplit ratio in permille (0–1000).
+	// Position is not persisted — Fyne exposes no window-position API.
+	prefsWindowWidthKey  = "window_width"
+	prefsWindowHeightKey = "window_height"
+	prefsSplitOffsetKey  = "split_offset"
 )
 
 // aggregate reports whether every child is checked (all) and whether at

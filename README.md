@@ -22,7 +22,19 @@ The results pane is a tree that mirrors the selection pane: regions start
 expanded, cities start collapsed — tap a row to expand it. Region and city
 rows are bold worst-case aggregates (column-by-column maximums across
 their finished providers). Players cannot choose their provider within a
-city, so the city row is what they might actually get.
+city, so the city row is what they might actually get. Tapping a column
+header sorts each region's cities by that metric — worst-first, then
+best-first, then back to test order; provider rows always keep test order.
+Tap a server row to copy it to the clipboard, tap an errored row to see
+the full error, and the **?** button above the table explains the colors.
+**Copy Summary** in the actions drawer copies the whole run as a text
+table, ready to paste into a thread.
+
+While a run is in flight, a progress bar with a remaining-time estimate
+tracks it, the status line reports live send/loss counts for the current
+server, and the selection tree marks that server with ▶. Cancel stops the
+run early — finished results are kept. Enter starts or cancels a test,
+Esc cancels a run or closes the drawer, and Ctrl/Cmd+C copies the summary.
 
 A few providers answer ICMP at a fixed token quota regardless of send rate
 (OVH, Psychz, Latitude.sh, …); those probe at a measured per-server rate so
@@ -72,16 +84,22 @@ Vladivostok) have no public HiperZ test endpoint and are not included.
 
 Servers appear in a three-level tree: region → city → provider, with
 tri-state checkboxes (partial/dash when only some children are selected).
-Expand a level with the ▸ button. Your selections and expanded tree
-sections are saved when you close the app.
+Expand a level with the ▸ button. A filter box above the tree narrows it
+to matching region, city, provider, or host names; **All** / **None** /
+**Invert** bulk-toggle the selection, and the count next to them shows
+how many servers are selected. Your selections and expanded tree
+sections are saved when you close the app, as are the window size and
+divider position.
 
 ## Custom server lists
 
-**Edit Servers** (in the actions drawer — the up-arrow button next to
-Test) opens the built-in list for customization. Pick a server on the
-left; edit its city, provider, host, and probe overrides on the right.
-**+** next to a city adds a server to it; **Delete Server** removes the
-selected one.
+**Edit Servers** (in the actions drawer — the **Actions** button next to
+Test, alongside Export CSV, Copy Summary, Identify, and About) opens the
+built-in list for customization. Pick a server on the left; edit its
+city, provider, host, and probe overrides on the right — the form hints
+explain each field. **+ Add region** and **+ City** create whole new
+regions and cities; **+** next to a city adds a server to it; **Delete
+Server** removes the selected one and **Undo delete** brings it back.
 
 Nothing changes until you press **Apply**, which stores the entire list
 as your custom server list — the first edit starts from the built-ins,
@@ -105,7 +123,7 @@ Per-server probe overrides, exposed in the editor as fields:
 ## Auto-updates
 
 Release builds check GitHub for a newer version on startup. If one
-exists, a dialog offers:
+exists, a dialog previews the release notes and offers:
 
 - **Update** — downloads the new release, replaces the running app, and
   restarts it (your selections are saved first).
@@ -119,7 +137,9 @@ the current version keeps running and the error dialog links the manual
 download page. An old file that couldn't be deleted at replace time is
 cleaned up automatically on the next launch.
 
-To re-enable checks after choosing **Never**, delete the
+To re-enable checks after choosing **Never**, open **About** (in the
+actions drawer) and press **Re-enable update checks** — the same dialog
+can also **Check for updates now** at any time. Alternatively, delete the
 `updates_disabled` key from the app's preferences file (location varies
 by OS; search your user config dir for `com.christianws.faceit-tester`).
 
@@ -167,7 +187,9 @@ region/city/provider names are errors (printed to the terminal when one
 is attached, and shown in the app's status bar). The spec is validated
 before the UAC prompt, so a bad spec fails fast without an elevation
 round-trip. The spec's selection replaces the checkbox state and — like
-manual selections — is saved when you close the app. The window stays
+manual selections — is saved when you close the app. Selected regions
+expand in the tree so the choice is visible; cities stay collapsed
+(players pick a location, not a provider). The window stays
 open on the results when the run finishes.
 
 On Windows the flag survives the elevation relaunch: launch with `--test`,

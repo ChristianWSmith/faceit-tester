@@ -10,13 +10,15 @@ import (
 
 // writeCSV exports test outcomes as CSV. Values use 3 decimal places for
 // millisecond columns (finer than the UI's 1) to support post-hoc analysis
-// such as deriving per-provider rate limits.
-func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcome) error {
+// such as deriving per-provider rate limits. testedAt is the run's start
+// time, written as RFC 3339 in every row so multiple exports are
+// distinguishable.
+func writeCSV(w io.Writer, regionOf func(Server) string, testedAt time.Time, outcomes []ServerOutcome) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
 	header := []string{
-		"region", "city", "provider", "host",
+		"region", "city", "provider", "host", "tested_at",
 		"sent", "recv", "loss_pct",
 		"median_ms", "p1_ms", "p99_ms", "jitter_ms",
 		"max_pps", "probe_size",
@@ -27,6 +29,7 @@ func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcom
 		return err
 	}
 
+	stamp := testedAt.Format(time.RFC3339)
 	for _, o := range outcomes {
 		r := o.Result
 		errStr := ""
@@ -47,6 +50,7 @@ func writeCSV(w io.Writer, regionOf func(Server) string, outcomes []ServerOutcom
 			o.Server.City,
 			o.Server.Provider,
 			o.Server.Host,
+			stamp,
 			strconv.Itoa(r.Sent),
 			strconv.Itoa(r.Recv),
 			lossStr,

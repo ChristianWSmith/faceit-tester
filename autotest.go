@@ -201,19 +201,19 @@ func matchName(want string, candidates []string) (string, error) {
 	return hit, nil
 }
 
-// expansionForSelection returns the tree node keys (region names and
-// "Region/City" paths) that must be expanded to show every checked server.
-// Callers merge the result into the persisted expansion map before the tree
-// is built.
+// expansionForSelection returns the tree node keys that must be expanded to
+// show every checked server's region. Only region nodes expand — cities stay
+// collapsed because FACEIT players select a location, not a provider: the
+// city checkbox's tri-state shows the selection, and the provider leaves
+// underneath are a power-user detail. Callers merge the result into the
+// persisted expansion map before the tree is built.
 func expansionForSelection(servers map[string][]Server, state map[string]bool) map[string]bool {
 	keys := make(map[string]bool)
 	for _, region := range regionNames(servers) {
-		for _, group := range groupByCity(servers[region]) {
-			for _, s := range group.Servers {
-				if state[s.ID()] {
-					keys[regionNodeKey(region)] = true
-					keys[cityNodeKey(region, group.City)] = true
-				}
+		for _, s := range servers[region] {
+			if state[s.ID()] {
+				keys[regionNodeKey(region)] = true
+				break
 			}
 		}
 	}

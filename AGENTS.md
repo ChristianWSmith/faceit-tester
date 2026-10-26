@@ -52,11 +52,49 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
 - **Fyne threading (2.6+):** all widget mutations from background goroutines
   must be wrapped in `fyne.Do(...)`. Button/entry callbacks already run on
   the UI thread.
+- **Bare keys never reach `canvas.AddShortcut`.** Fyne 2.8's glfw driver
+  only builds shortcut objects for *modifier chords* (Ctrl+C → concrete
+  `fyne.ShortcutCopy`, dispatched by ShortcutName — entries consume their
+  own copy first because the driver routes chords to the focused
+  `Shortcutable` before the canvas). Bare Return/Esc go to the focused
+  widget's TypedKey and fall through to `canvas.SetOnTypedKey` **only
+  when nothing is focused**. Focus is won by check taps
+  (`focusIfNotMobile`) and table taps, cleared by button taps
+  (`Button.Tapped` → `Focus(nil)`) — so `registerShortcuts` uses
+  SetOnTypedKey for Enter/Esc, registers `&fyne.ShortcutCopy{}` for
+  Ctrl/Cmd+C, gates on `Overlays().Top() != nil` (dialog buttons unfocus
+  on tap, so focus alone can't detect an open dialog), and the
+  check/table handlers call `unfocus()` to keep the bare-key path alive.
+  A focused Entry must never be treated as "safe to fire Test" — the
+  gate exists because shortcuts otherwise preempt Return in text fields.
 - **Results header alignment:** `Table.findX` inserts `SizeNamePadding`
   *between* columns, so the hand-built header row must be a plain `HBox`
   (same padding between children) with no outer `NewPadded` wrapper —
   zero-gap or padded-wrong headers drift progressively against the body.
   Table and header column widths must always come from the same constants.
+- **VBox sizes children to their MinSize — it never stretches them**
+  (layout/boxlayout.go; only vertical spacers absorb slack). Wrapping a
+  `VScroll` in a VBox collapses it to min height and squashes the pane's
+  content against the top; use `container.NewBorder(top, nil, nil, nil,
+  scroll)` when the controls pin top and the scroll must fill the rest.
+- **A window never shrinks below its content's MinSize, and grows to
+  meet it** — not just at startup: **every frame** `repaintWindow` calls
+  `canvas.EnsureMinSize()` (driver/common/canvas.go), which resizes the
+  canvas and queues `fitContent()` → `view.SetSize()` whenever content
+  min exceeds the current size. Any widget whose min varies with
+  content — a label whose text changes, a tree that reveals nodes —
+  resizes the *whole window* when it crosses the current size. Lock
+  variable text into a fixed `container.NewGridWrap` cell (Fyne 2.8 has
+  no SetMinSize) so typing in a filter or a growing count can't jerk
+  the window around.
+- **`NewVScroll` folds content *width* into its MinSize** (the
+  `Scroll.MinSize` switch's `ScrollVerticalOnly` case), while
+  **`NewScroll` (ScrollBoth) hits no case and ignores content in both
+  dimensions**. The tree pane must use `NewScroll`: with VScroll a
+  filter force-expanding a wide branch grew the pane min, the split's
+  min-clamp stole width from the results pane, and EnsureMinSize grew
+  the OS window per keystroke (long names get a horizontal scrollbar
+  instead). `TestScrollMinNeverFollowsContent` pins this.
 - **`dialog.NewCustom` always renders its dismiss button**, even with an
   empty text (invisible stub). Use `NewCustomWithoutButtons` when the
   content owns its own bottom button row.
@@ -90,8 +128,10 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   validated *before* the UAC prompt so a bad spec fails fast on the
   terminal — errors print to stderr *and* show in the status label (the
   packaged exe is windowsgui: stderr writes are silent no-ops there).
-  The spec replaces `u.state` and adds ancestors to `u.expanded`
-  *before* `build()`. Auto-start is a goroutine launched *before*
+  The spec replaces `u.state` and expands the selected servers' *regions*
+  (not cities — providers are a power-user detail; the city checkbox's
+  tri-state shows the selection) via `expansionForSelection`, *before*
+  `build()`. Auto-start is a goroutine launched *before*
   `ShowAndRun` that sleeps ~100ms then calls `fyne.Do(onTestTap)` —
   `fyne.Do` must not run before the event loop exists, and there is no
   after-first-render hook in Fyne to use instead. Skipped when unelevated
@@ -196,10 +236,16 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   write-through on every keystroke (no pending-flush on navigation), and
   nothing touches prefs until Apply. First open clones the *effective*
   table, so the first Apply always stores a complete baseline + edits;
-  Cancel (or the dialog's close) discards everything — it's also the
-  undo for deletes. `applyServerTable` in main.go swaps the live table:
-  rebuilds the tree into `treeHolder`, re-derives state/expansion
-  against the new IDs, and clears results.
+  Cancel (or the dialog's close) discards everything. Delete snapshots
+  the row for a single-level **Undo delete** button (a new delete
+  overwrites the buffer). `+ Add region` / `+ City` create whole new
+  regions/cities via a one-field Form popup (validated: non-empty, no
+  "/", no duplicates) seeded with a placeholder server. Form fields carry
+  `HintText` explaining Max PPS / Probe size / Host / Scrubbed (Fyne has
+  no tooltip API). `tableFromRows` strips zero-row regions (they would
+  render as empty tree nodes). `applyServerTable` in main.go swaps the
+  live table: rebuilds the tree into `treeHolder`, re-derives
+  state/expansion against the new IDs, and clears results.
 - `prefs.go` — pure, unit-tested state logic. Persistence is a *denylist*
   of unchecked server IDs (`disabled_servers`) plus an allowlist of
   expanded tree nodes (`expanded_nodes`). Only IDs present in the active
@@ -207,43 +253,76 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   pruned on save. First launch (empty key) = everything checked. Both
   lists are saved once from the window `SetCloseIntercept` handler (not
   per checkbox tap — per-toggle prefs writes made the UI sluggish on
-  slow storage; a crash loses unsaved toggles, accepted tradeoff).
+  slow storage; a crash loses unsaved toggles, accepted tradeoff). The
+  same close handler also persists window geometry: content width/height
+  in pixels (`window_width`/`window_height`, clamped 720–3840 ×
+  480–2160 on restore via `savedWindowSize`) and the HSplit ratio in
+  permille (`split_offset`, clamped 5–95% by `clampSplitOffset`). Fyne
+  exposes no window-*position* API — size only.
 - `pinger.go` — pro-bing wrapper: per-server pacing (`probePacing`, default
   64pps/600B, `MaxPPS`/`ProbeSize` overrides), jitter = mean |ΔRTT|
   (RFC 3550), RTT stats are nearest-rank median/p1/p99 percentiles of the
   reply samples (avg/min/max proved less informative — one delayed reply
   skewed a whole row), platform fallback logic.
 - `runner.go` — sequential 10s probes, context-cancelled (flat window even
-  for paced hosts).
+  for paced hosts). `onStatus` receives the `Server` itself (not just
+  the display name) so callers can key tree-marker state by ID.
 - `results.go` — hierarchical results model (region → city → provider)
-  behind the results table: `addOutcome` appends leaves, `flatten`
-  recomputes worst-case aggregates for region/city rows on every render
-  (bold, ▸/▾ glyph, child count), `worstCase` is the shared column-wise
-  worst merge (error-skip, scrubbed-RTT-only). Tapping a parent row
-  toggles expansion (in-memory only; new runs start with regions
-  expanded and cities collapsed).
+  behind the results table: `addOutcome` appends leaves,
+  `flattenWithRefs` recomputes worst-case aggregates for region/city rows
+  on every render (bold, ▸/▾ glyph, child count) *plus* a parallel
+  `[]rowRef` slice so tap handlers resolve rows without re-deriving
+  indexes from tree order. City order honors `sortMode` + `desc`
+  (probe order by default; metric modes rank a region's cities by
+  their worst-case aggregate in either direction with errors/n-a last
+  in both — `sortedCityIndexes`/`rowCellLess`; providers always keep
+  probe order because players choose locations, not providers, and
+  regions keep RegionOrder). `worstCase`
+  is the shared column-wise worst merge (error-skip, scrubbed-RTT-only).
+  Tapping a
+  parent row toggles expansion via `toggleNode(rowRef)` (in-memory only;
+  new runs start with regions expanded and cities collapsed).
 - `main.go` — Fyne UI: region→city→provider tri-state selection tree
-  (collapsed by default, expansion persisted), Test/Cancel toggle
-  (green/red via Importance), results table driven by
-  `resultsTree.flatten()` with per-cell green/yellow/red grading: below
-  the warn thresholds green, at-or-above warn / at-or-below the CS2 HUD
-  thresholds yellow (WarningImportance), strictly above red (ping
-  70/100ms, jitter 5/10ms, loss 1/2%; RTT columns are p1/median/p99);
-  region/city rows are bold worst-case aggregates (scrubbed providers
-  contribute RTT only — jitter/loss show n/a). The Server column
-  auto-sizes to the widest name cell (`nameColumnWidth` +
-  `rebuildHeader`). Tap a parent row to collapse/expand it. All UI
-  updates from the runner goroutine go through `fyne.Do`.
-- Secondary actions (Export CSV, Edit Servers, Identify) live in a
-  floating drawer above the button row: `widget.NewStack(main, drawerLayer)`
-  where the drawer is a tap-catcher + right-aligned vertical button column
-  on an overlay-colored backdrop panel. The arrow button toggles it and
-  flips icon direction; every close path goes through `hideDrawer` so the
-  icon can't desync from visibility. Built in `content()`, not `build()`.
+  (collapsed by default, expansion persisted) with a **filter entry**
+  (substring match on region/city/provider/host; whole city/region
+  blocks show/hide — hiding only the header left an indent-wrapper gap
+  per filtered-out city — and visible branches force-expand, parent
+  checks disable so a cascade can't select hidden servers) and
+  **All/None/Invert** bulk buttons plus a live "N of M selected" count
+  (folded with the filter's match count; its cell is width-locked via
+  GridWrap so typing can't resize the window). Expansion toggles only
+  via the ▸/▾ button — a whole-row tap catcher highlighted like a
+  button and was inconsistent with the results table. Test/Cancel
+  toggle (green/red via
+  Importanance); Cancel flips to "Cancelling…" immediately and disables
+  the button. While running: a determinate progress bar + ETA ("about
+  9m left") — the bar is a thin full-width strip *below* the status/
+  button row (never stacked beside the buttons, which stretched their
+  band vertically) and blends the current server's send fraction
+  (`expectedSends` from `probePacing`) into the overall value, because
+  per-server-only steps (~1.4% of a 70-server run) are invisible; also
+  a ▶ marker on the active leaf check,
+  and a throttled (~4/s) running-loss status line. Results table driven
+  by `flattenWithRefs()` with per-cell green/yellow/red grading; sortable
+  headers (tap a column to cycle inactive → worst-first/asc → opposite →
+  off; sorts a region's cities by their aggregate, never the providers);
+  tap a leaf
+  to copy its row or show the full error; tap a parent to toggle; no
+  caption/placeholder chrome above or inside the table — the status
+  label is the only prose; "?" legend
+  dialog explaining thresholds and n/a. Secondary actions live in a
+  labeled "Actions" drawer (constant text both states — only the icon
+  flips; "Hide" changed the button width and made the row jump):
+  Export CSV, Copy Summary, Edit Servers,
+  Identify, About. Keyboard shortcuts (canvas-level, Entry-gated):
+  Enter = Test, Esc = cancel/close drawer, Ctrl/Cmd+C = copy summary.
+  About shows the version + manual update check (the recovery path after
+  "Never"). All runner-goroutine UI updates go through `fyne.Do`.
 - `csv.go` — export with 3-decimal ms precision (UI table shows 1) for the
-  median/p1/p99/jitter columns plus `max_pps`/`probe_size` (0 = default)
-  and a `notes` column (`icmp-scrubbed` for scrubbed rows, whose
-  loss/jitter cells are blank).
+  median/p1/p99/jitter columns plus `tested_at` (RFC 3339 run start,
+  same value on every row of one export), `max_pps`/`probe_size`
+  (0 = default), and a `notes` column (`icmp-scrubbed` for scrubbed
+  rows, whose loss/jitter cells are blank).
 - `identify.go` — "Identify" dialog backend: `parseConnect` is
   deliberately loose (scans pasted text for `connect <addr>`, any IP
   token, or a whole-input hostname — port/semicolon/keyword all
@@ -260,7 +339,9 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   provider, `all` reserved at every level, case-insensitive name matching,
   errors on unknown names or empty selections) into the same
   server-ID → checked map `stateFromDisabled` produces; `expansionForSelection`
-  derives tree-node keys to expand so the selection is visible;
+  derives tree-node keys to expand so the selection is visible —
+  **regions only, cities stay collapsed** (players select a location,
+  not a provider; the tri-state city row shows the selection);
   `quoteWinArg`/`joinWinArgs` render Windows parameter strings for
   `elevateAndRestart`'s arg forwarding (CommandLineToArgvW quoting rules).
 - `version.go` — **stamp-only**: `var version = "dev"`, overwritten
@@ -273,12 +354,17 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
 - `update.go` + `update_windows.go`/`update_linux.go`/`update_darwin.go`/
   `update_other.go` — startup update check (GitHub latest-release API,
   gated by `shouldCheckUpdate`: dev/pref/`--test`/missing-asset all skip;
-  `--force-update-check` bypasses), the Update/Later/Never dialog,
-  download with Content-Length verification + throttled progress,
-  stdlib zip extraction with slip rejection, per-OS
-  `replaceAndRelaunch`, and startup `cleanupOlds`. Dialog wiring and the
-  `--force-update-check` flag live in `main.go`; the `updates_disabled`
-  pref key is in `prefs.go`.
+  `--force-update-check` bypasses), the Update/Later/Never dialog
+  (release-notes preview + hyperlink when `body`/`html_url` are present),
+  download with Content-Length verification + throttled byte-count
+  progress (`updateProgress` struct: phase + written/total — unknown
+  length shows a byte counter with the bar hidden), stdlib zip extraction
+  with slip rejection, per-OS `replaceAndRelaunch`, and startup
+  `cleanupOlds`. Dialog wiring and the `--force-update-check` flag live
+  in `main.go`; the `updates_disabled` pref key is in `prefs.go`. The
+  About dialog's "Check for updates now" runs `checkForUpdate(manual:
+  true)`, which bypasses the dev/never gates and reports errors/"latest"
+  in the status label (startup stays silent).
 - `smoke_test.go` / tests — network tests skip under `-short`.
 
 ## Updating the server list

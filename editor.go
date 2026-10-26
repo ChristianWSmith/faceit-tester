@@ -86,13 +86,16 @@ func rowsFromTable(table map[string][]Server) map[string][]editRow {
 }
 
 // tableFromRows parses the editor's row view back into a storage table,
-// rejecting incomplete or invalid input. Regions with no rows are kept
-// (regions come from the baseline and are not editable), but the list as
-// a whole must keep at least one server.
+// rejecting incomplete or invalid input. Regions whose row list is empty
+// are dropped — they carry no information and would render as empty tree
+// nodes — but the list as a whole must keep at least one server.
 func tableFromRows(rows map[string][]editRow) (map[string][]Server, error) {
 	table := make(map[string][]Server, len(rows))
 	total := 0
 	for region, list := range rows {
+		if len(list) == 0 {
+			continue
+		}
 		out := make([]Server, 0, len(list))
 		for i, r := range list {
 			s, err := r.toServer()
@@ -138,25 +141,31 @@ func groupRowsByCity(rows []editRow) []rowGroup {
 // serverEditor is the custom-list dialog: a region → city → server list
 // on the left, a per-server form on the right. Nothing touches prefs
 // until Apply; Cancel discards the working copy wholesale (which is also
-// the undo for deletes). The working copy starts from the effective
-// table — built-ins when no custom list exists — so the first Apply
-// always stores a complete baseline plus the user's edits.
+// the undo for deletes — or use the single-level Undo button). The
+// working copy starts from the effective table — built-ins when no
+// custom list exists — so the first Apply always stores a complete
+// baseline plus the user's edits.
 type serverEditor struct {
 	u       *ui
 	working map[string][]editRow
 	region  string // selected row's region; index < 0 = nothing selected
 	index   int
 
-	d         *dialog.CustomDialog
-	listBox   *fyne.Container
-	errLabel  *widget.Label
-	city      *widget.Entry
-	provider  *widget.Entry
-	host      *widget.Entry
-	maxPPS    *widget.Entry
-	probe     *widget.Entry
-	scrubbed  *widget.Check
-	deleteBtn *widget.Button
+	d          *dialog.CustomDialog
+	listBox    *fyne.Container
+	errLabel   *widget.Label
+	city       *widget.Entry
+	provider   *widget.Entry
+	host       *widget.Entry
+	maxPPS     *widget.Entry
+	probe      *widget.Entry
+	scrubbed   *widget.Check
+	deleteBtn  *widget.Button
+	undoBtn    *widget.Button
+	undoRegion string
+	undoIndex  int
+	undoRow    editRow
+	hasUndo    bool
 
 	// syncing guards write-through handlers while selectRow repopulates
 	// the form (SetText/SetChecked fire callbacks).
@@ -196,7 +205,7 @@ func (e *serverEditor) build() {
 	e.maxPPS.Validator = nonNegativeInt
 	e.probe = widget.NewEntry()
 	e.probe.Validator = nonNegativeInt
-	e.scrubbed = widget.NewCheck("Loss/jitter unmeasurable (DDoS scrubber)", nil)
+	e.scrubbed = widget.NewCheck("Scrubbed", nil)
 
 	// Write-through: every keystroke lands in the working copy, so
 	// navigating away never has to flush pending field state.
@@ -207,16 +216,30 @@ func (e *serverEditor) build() {
 	e.probe.OnChanged = func(v string) { e.write(func(r *editRow) { r.ProbeSize = v }) }
 	e.scrubbed.OnChanged = func(v bool) { e.write(func(r *editRow) { r.Scrubbed = v }) }
 
+	// FormItem.HintText renders under the field in placeholder styling —
+	// Fyne has no tooltip API, and these fields' semantics (policer
+	// quotas, size filters, scrubbers) would otherwise be undocumented.
+	hostItem := widget.NewFormItem("Host", e.host)
+	hostItem.HintText = "IPv4/hostname reachable over ICMP (this is what gets probed)"
+	ppsItem := widget.NewFormItem("Max PPS", e.maxPPS)
+	ppsItem.HintText = "Cap the probe send rate (packets/sec). 0 or empty = default 64. Set when a provider rate-limits ICMP."
+	sizeItem := widget.NewFormItem("Probe size", e.probe)
+	sizeItem.HintText = "ICMP payload bytes. 0 or empty = default 600. Lower (e.g. 56) when a provider filters large echo packets."
+	scrubItem := widget.NewFormItem("Scrubbed", e.scrubbed)
+	scrubItem.HintText = "Replies come from a DDoS scrubber, not the game path — loss/jitter report as n/a; RTT stays valid."
 	form := widget.NewForm(
 		widget.NewFormItem("City", e.city),
 		widget.NewFormItem("Provider", e.provider),
-		widget.NewFormItem("Host", e.host),
-		widget.NewFormItem("Max PPS", e.maxPPS),
-		widget.NewFormItem("Probe size", e.probe),
-		widget.NewFormItem("Scrubbed", e.scrubbed),
+		hostItem,
+		ppsItem,
+		sizeItem,
+		scrubItem,
 	)
 
 	e.deleteBtn = widget.NewButtonWithIcon("Delete Server", theme.DeleteIcon(), e.deleteSelected)
+	e.undoBtn = widget.NewButton("Undo delete", e.undoDelete)
+	e.undoBtn.Importance = widget.LowImportance
+	e.undoBtn.Disable()
 	e.errLabel = widget.NewLabel("")
 	e.errLabel.Importance = widget.DangerImportance
 	e.errLabel.Wrapping = fyne.TextWrapWord
@@ -237,10 +260,10 @@ func (e *serverEditor) build() {
 	btns = append(btns, layout.NewSpacer(), cancelBtn, applyBtn)
 	buttons := container.NewHBox(btns...)
 
-	center := container.NewVBox(form, e.deleteBtn, e.errLabel)
+	center := container.NewVBox(form, container.NewHBox(e.deleteBtn, e.undoBtn), e.errLabel)
 	body := container.NewBorder(header, buttons, scroll, nil, center)
 	e.d = dialog.NewCustomWithoutButtons("Edit servers", body, e.u.window)
-	e.d.Resize(fyne.NewSize(720, 520))
+	e.d.Resize(fyne.NewSize(720, 560))
 
 	e.rebuildList()
 }
@@ -319,13 +342,19 @@ func (e *serverEditor) setFormEnabled(enabled bool) {
 
 // rebuildList re-renders the left pane from the working copy; the
 // selected row is highlighted. Cheap at ~90 rows, and City/Provider
-// edits must re-render to stay in sync.
+// edits must re-render to stay in sync. Each region header carries a
+// "+ City" button; a top-level "+ Add region" creates whole regions.
 func (e *serverEditor) rebuildList() {
 	e.listBox.RemoveAll()
+	addRegionBtn := widget.NewButton("+ Add region", e.addRegionPrompt)
+	addRegionBtn.Importance = widget.LowImportance
+	e.listBox.Add(addRegionBtn)
 	for _, region := range orderedRegions(e.working) {
 		regionLabel := widget.NewLabel(region)
 		regionLabel.TextStyle = fyne.TextStyle{Bold: true}
-		e.listBox.Add(regionLabel)
+		addCityBtn := widget.NewButton("+ City", func() { e.addCityPrompt(region) })
+		addCityBtn.Importance = widget.LowImportance
+		e.listBox.Add(container.NewHBox(regionLabel, layout.NewSpacer(), addCityBtn))
 		for _, g := range groupRowsByCity(e.working[region]) {
 			cityLabel := widget.NewLabel(fmt.Sprintf("%s (%d)", g.City, len(g.Indexes)))
 			addBtn := widget.NewButton("+", func() { e.addServer(region, g.City) })
@@ -357,12 +386,87 @@ func (e *serverEditor) addServer(region, city string) {
 	e.selectRow(region, len(e.working[region])-1)
 }
 
-// deleteSelected removes the selected row. No confirmation: Cancel
-// discards the whole session, which is the undo.
+// addRegionPrompt asks for a new region name and seeds it with one
+// placeholder server (a zero-row region would be invisible in the list
+// and stripped on Apply).
+func (e *serverEditor) addRegionPrompt() {
+	nameEntry := widget.NewEntry()
+	nameEntry.Validator = func(s string) error {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return fmt.Errorf("region name must not be empty")
+		}
+		if strings.Contains(s, "/") {
+			return fmt.Errorf(`region must not contain "/"`)
+		}
+		if _, exists := e.working[s]; exists {
+			return fmt.Errorf("region %q already exists", s)
+		}
+		return nil
+	}
+	e.promptName("Add region", "Region name", nameEntry, func(name string) {
+		e.working[name] = []editRow{{City: "New City", Provider: "New Provider"}}
+		e.selectRow(name, 0)
+	})
+}
+
+// addCityPrompt asks for a new city name within region and seeds it
+// with one placeholder server.
+func (e *serverEditor) addCityPrompt(region string) {
+	nameEntry := widget.NewEntry()
+	nameEntry.Validator = func(s string) error {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return fmt.Errorf("city name must not be empty")
+		}
+		if strings.Contains(s, "/") {
+			return fmt.Errorf(`city must not contain "/"`)
+		}
+		for _, r := range e.working[region] {
+			if r.City == s {
+				return fmt.Errorf("city %q already exists in %s", s, region)
+			}
+		}
+		return nil
+	}
+	e.promptName("Add city in "+region, "City name", nameEntry, func(name string) {
+		e.working[region] = append(e.working[region], editRow{
+			City:     name,
+			Provider: "New Provider",
+		})
+		e.selectRow(region, len(e.working[region])-1)
+	})
+}
+
+// promptName shows a one-field Form dialog and calls onOK with the
+// validated (trimmed) name. The Form's Validator keeps OK disabled
+// until the entry is valid.
+func (e *serverEditor) promptName(title, label string, entry *widget.Entry, onOK func(string)) {
+	item := widget.NewFormItem(label, entry)
+	d := dialog.NewForm(title, "Add", "Cancel", []*widget.FormItem{item},
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			onOK(strings.TrimSpace(entry.Text))
+		}, e.u.window)
+	d.Resize(fyne.NewSize(360, 0))
+	d.Show()
+}
+
+// deleteSelected removes the selected row, snapshotting it for the
+// single-level undo. No confirmation: Cancel discards the whole session
+// and Undo restores the last delete.
 func (e *serverEditor) deleteSelected() {
 	if e.index < 0 {
 		return
 	}
+	e.undoRegion = e.region
+	e.undoIndex = e.index
+	e.undoRow = e.working[e.region][e.index]
+	e.hasUndo = true
+	e.undoBtn.Enable()
+
 	rows := e.working[e.region]
 	e.working[e.region] = append(rows[:e.index], rows[e.index+1:]...)
 	if len(e.working[e.region]) > 0 {
@@ -380,6 +484,25 @@ func (e *serverEditor) deleteSelected() {
 	e.region, e.index = "", -1
 	e.setFormEnabled(false)
 	e.rebuildList()
+}
+
+// undoDelete re-inserts the last deleted row at its original index
+// (clamped: rows may have been added since). Single-level: a new delete
+// overwrites the buffer.
+func (e *serverEditor) undoDelete() {
+	if !e.hasUndo {
+		return
+	}
+	rows := e.working[e.undoRegion]
+	i := e.undoIndex
+	if i > len(rows) {
+		i = len(rows)
+	}
+	rows = append(rows[:i], append([]editRow{e.undoRow}, rows[i:]...)...)
+	e.working[e.undoRegion] = rows
+	e.hasUndo = false
+	e.undoBtn.Disable()
+	e.selectRow(e.undoRegion, i)
 }
 
 // apply validates the working copy, persists it as the custom list, and

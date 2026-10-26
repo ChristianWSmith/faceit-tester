@@ -42,7 +42,8 @@ func TestWriteCSV(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeCSV(&buf, func(s Server) string { return regionBy[s.ID()] }, outcomes)
+	testedAt := time.Date(2026, 10, 25, 14, 32, 5, 0, time.UTC)
+	err := writeCSV(&buf, func(s Server) string { return regionBy[s.ID()] }, testedAt, outcomes)
 	if err != nil {
 		t.Fatalf("writeCSV: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestWriteCSV(t *testing.T) {
 	}
 	header := records[0]
 	wantHeader := []string{
-		"region", "city", "provider", "host",
+		"region", "city", "provider", "host", "tested_at",
 		"sent", "recv", "loss_pct",
 		"median_ms", "p1_ms", "p99_ms", "jitter_ms",
 		"max_pps", "probe_size",
@@ -71,50 +72,53 @@ func TestWriteCSV(t *testing.T) {
 	if row[0] != "NA" || row[1] != "Chicago" || row[2] != "Psychz Networks" {
 		t.Errorf("identity cols = %v", row[:3])
 	}
-	if row[4] != "640" || row[5] != "639" || row[6] != "0.16" {
-		t.Errorf("count cols = %v", row[4:7])
+	if row[4] != testedAt.Format(time.RFC3339) {
+		t.Errorf("tested_at = %q, want RFC3339 of the run time", row[4])
 	}
-	if row[7] != "22.000" || row[8] != "18.000" || row[9] != "29.000" || row[10] != "1.500" {
-		t.Errorf("ms cols = %v", row[7:11])
+	if row[5] != "640" || row[6] != "639" || row[7] != "0.16" {
+		t.Errorf("count cols = %v", row[5:8])
 	}
-	if row[11] != "0" || row[12] != "0" {
-		t.Errorf("override cols = %v, want 0 0", row[11:13])
+	if row[8] != "22.000" || row[9] != "18.000" || row[10] != "29.000" || row[11] != "1.500" {
+		t.Errorf("ms cols = %v", row[8:12])
 	}
-	if row[13] != "" {
-		t.Errorf("notes col should be empty, got %q", row[13])
+	if row[12] != "0" || row[13] != "0" {
+		t.Errorf("override cols = %v, want 0 0", row[12:14])
 	}
 	if row[14] != "" {
-		t.Errorf("error col should be empty, got %q", row[14])
+		t.Errorf("notes col should be empty, got %q", row[14])
+	}
+	if row[15] != "" {
+		t.Errorf("error col should be empty, got %q", row[15])
 	}
 
 	// Scrubbed endpoint: loss/jitter blank, note set, RTT kept.
 	row2 := records[2]
-	if row2[6] != "" || row2[10] != "" {
-		t.Errorf("scrubbed loss/jitter = (%q, %q), want blank", row2[6], row2[10])
+	if row2[7] != "" || row2[11] != "" {
+		t.Errorf("scrubbed loss/jitter = (%q, %q), want blank", row2[7], row2[11])
 	}
-	if row2[7] != "49.000" {
-		t.Errorf("scrubbed avg = %q, want 49.000", row2[7])
+	if row2[8] != "49.000" {
+		t.Errorf("scrubbed avg = %q, want 49.000", row2[8])
 	}
-	if row2[11] != "0" || row2[12] != "0" {
-		t.Errorf("scrubbed override cols = %v, want 0 0", row2[11:13])
+	if row2[12] != "0" || row2[13] != "0" {
+		t.Errorf("scrubbed override cols = %v, want 0 0", row2[12:14])
 	}
-	if row2[13] != "icmp-scrubbed" {
-		t.Errorf("scrubbed notes = %q, want icmp-scrubbed", row2[13])
+	if row2[14] != "icmp-scrubbed" {
+		t.Errorf("scrubbed notes = %q, want icmp-scrubbed", row2[14])
 	}
 
 	// Payload-size override is exported too.
 	row3 := records[3]
-	if row3[11] != "0" || row3[12] != "56" {
-		t.Errorf("nfo override cols = %v, want max_pps=0 probe_size=56", row3[11:13])
+	if row3[12] != "0" || row3[13] != "56" {
+		t.Errorf("nfo override cols = %v, want max_pps=0 probe_size=56", row3[12:14])
 	}
 
 	// Error outcome carries the message.
 	row4 := records[4]
-	if !strings.Contains(row4[14], "unreachable") {
-		t.Errorf("error col = %q", row4[14])
+	if !strings.Contains(row4[15], "unreachable") {
+		t.Errorf("error col = %q", row4[15])
 	}
-	if row4[6] != "0.00" {
-		t.Errorf("loss for error outcome = %q, want 0.00", row4[6])
+	if row4[7] != "0.00" {
+		t.Errorf("loss for error outcome = %q, want 0.00", row4[7])
 	}
 }
 

@@ -45,5 +45,9 @@ PACKET_LOSS_FINDINGS.md
 .opencode/*
 !.opencode/skills/
 
+# UX polish planning docs (session working notes; covered by .opencode/* above,
+# listed explicitly so the ignore intent is obvious)
+.opencode/plan/
+
 # Update-relic trash from rename-first self-update (cleanupOlds sweeps at startup)
 *.old

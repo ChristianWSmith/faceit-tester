@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func TestWorstCase(t *testing.T) {
 	if allErr[0].text != "NY" || !allErr[0].bold {
 		t.Errorf("all-err name cell = %+v", allErr[0])
 	}
-	if allErr[5].imp != widget.DangerImportance || allErr[5].text != "error: x" {
+	if allErr[5].imp != widget.DangerImportance || allErr[5].text != "error" {
 		t.Errorf("all-err loss cell = %+v", allErr[5])
 	}
 
@@ -184,9 +185,11 @@ func TestFlatten(t *testing.T) {
 		t.Errorf("EU region aggregate = %v, want UK numbers", euRegion[1:])
 	}
 
-	// Collapsing NA hides its city row.
-	if !tr.toggle(0) {
-		t.Fatal("toggle(0) should collapse the NA region")
+	// Collapsing NA hides its city row. Toggle via the rowRef the same
+	// flatten pass produced (parents are toggled by ref, not raw index).
+	_, refs := tr.flattenWithRefs()
+	if !tr.toggleNode(refs[0]) {
+		t.Fatal("toggleNode(NA region ref) should collapse the NA region")
 	}
 	rows = tr.flatten()
 	if len(rows) != 3 {
@@ -195,11 +198,13 @@ func TestFlatten(t *testing.T) {
 	if rows[0][0].text != "▸ NA (2)" {
 		t.Errorf("collapsed region label = %q, want ▸ NA (2)", rows[0][0].text)
 	}
-	tr.toggle(0) // expand NA again
+	_, refs = tr.flattenWithRefs()
+	tr.toggleNode(refs[0]) // expand NA again
 
 	// Expanding a city reveals its leaves; collapsing hides them again.
-	if !tr.toggle(1) {
-		t.Fatal("toggle(1) should expand the Chicago city")
+	_, refs = tr.flattenWithRefs()
+	if !tr.toggleNode(refs[1]) {
+		t.Fatal("toggleNode(Chicago city ref) should expand the Chicago city")
 	}
 	rows = tr.flatten()
 	if len(rows) != 6 {
@@ -214,7 +219,8 @@ func TestFlatten(t *testing.T) {
 	if rows[2][0].bold {
 		t.Error("leaf row should not be bold")
 	}
-	tr.toggle(1) // collapse Chicago again
+	_, refs = tr.flattenWithRefs()
+	tr.toggleNode(refs[1]) // collapse Chicago again
 	rows = tr.flatten()
 	if len(rows) != 4 {
 		t.Fatalf("after Chicago collapse: got %d rows, want 4", len(rows))
@@ -226,10 +232,12 @@ func TestFlatten(t *testing.T) {
 	}
 
 	// Tapping a leaf row reports no toggle. Expand Chicago first so a
-	// leaf is visible (flat row 3 = Datacamp).
-	tr.toggle(1)
-	if tr.toggle(3) {
-		t.Error("toggle on a leaf row should return false")
+	// leaf is visible, then toggleNode on the leaf ref.
+	_, refs = tr.flattenWithRefs()
+	tr.toggleNode(refs[1])
+	_, refs = tr.flattenWithRefs()
+	if tr.toggleNode(refs[3]) {
+		t.Error("toggleNode on a leaf row should return false")
 	}
 }
 
@@ -257,5 +265,77 @@ func TestFlattenScrubbedRegion(t *testing.T) {
 				t.Errorf("scrubbed-only aggregate cell %d = %+v, want n/a", i, row[i])
 			}
 		}
+	}
+}
+
+// TestFlattenSortsCitiesNotProviders pins the sort scope: a metric mode
+// reorders a region's cities by their worst-case aggregate, while the
+// provider leaves inside each city keep probe (insertion) order —
+// players choose locations, not providers.
+func TestFlattenSortsCitiesNotProviders(t *testing.T) {
+	tr := newResultsTree()
+	// Insertion order: Fast city first, then Slow.
+	tr.addOutcome("NA", ServerOutcome{
+		Server: srv("Fast", "ProviderB", "b"),
+		Result: PingResult{Sent: 640, Recv: 640, Median: 10 * time.Millisecond},
+	})
+	tr.addOutcome("NA", ServerOutcome{
+		Server: srv("Fast", "ProviderA", "a"),
+		Result: PingResult{Sent: 640, Recv: 640, Median: 20 * time.Millisecond},
+	})
+	tr.addOutcome("NA", ServerOutcome{
+		Server: srv("Slow", "ProviderC", "c"),
+		Result: PingResult{Sent: 640, Recv: 640, Median: 90 * time.Millisecond},
+	})
+
+	// Default: probe order — Fast before Slow; providers in insertion
+	// order (ProviderB before ProviderA despite worse median).
+	rows := tr.flatten()
+	gotNames := func() []string {
+		var names []string
+		for _, r := range rows {
+			names = append(names, strings.TrimSpace(r[0].text))
+		}
+		return names
+	}
+	want := []string{"▾ NA (3)", "▸ Fast (2)", "▸ Slow (1)"}
+	for i, w := range want {
+		if gotNames()[i] != w {
+			t.Fatalf("probe order rows = %v, want prefix %v", gotNames(), want)
+		}
+	}
+
+	// Worst-median descending: Slow city first, providers untouched.
+	tr.setSort(sortWorstMedian, true)
+	rows, refs := tr.flattenWithRefs()
+	// rows: NA, Slow city, Fast city (cities collapsed by default → no leaves)
+	if rows[1][0].text != "    ▸ Slow (1)" || rows[2][0].text != "    ▸ Fast (2)" {
+		t.Errorf("desc city order = %q, %q; want Slow then Fast",
+			rows[1][0].text, rows[2][0].text)
+	}
+	// rowRefs address original city indexes regardless of display order.
+	if refs[1].city != 1 || refs[2].city != 0 {
+		t.Errorf("refs cities = %d, %d; want original indexes 1, 0", refs[1].city, refs[2].city)
+	}
+
+	// Expand Fast and confirm leaves stay in probe order (ProviderB,
+	// ProviderA) under an active sort.
+	tr.toggleNode(refs[2])
+	rows, _ = tr.flattenWithRefs()
+	var leaves []string
+	for _, r := range rows {
+		if !r[0].bold {
+			leaves = append(leaves, strings.TrimSpace(r[0].text))
+		}
+	}
+	if len(leaves) != 2 || leaves[0] != "Fast.ProviderB" || leaves[1] != "Fast.ProviderA" {
+		t.Errorf("Fast leaves under sort = %v, want probe order [Fast.ProviderB Fast.ProviderA]", leaves)
+	}
+
+	// Ascending: Fast first (still expanded from the toggle above).
+	tr.setSort(sortWorstMedian, false)
+	rows, _ = tr.flattenWithRefs()
+	if rows[1][0].text != "    ▾ Fast (2)" {
+		t.Errorf("asc first city = %q, want expanded Fast", rows[1][0].text)
 	}
 }

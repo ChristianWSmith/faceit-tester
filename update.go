@@ -27,6 +27,8 @@ const (
 // releaseInfo is the subset of the GitHub release JSON the updater needs.
 type releaseInfo struct {
 	TagName string `json:"tag_name"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
 	Assets  []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
@@ -176,12 +178,20 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// updateProgress describes one tick of the update flow for the UI:
+// Phase is "download", "extract", or "install"; Written/Total are byte
+// counts meaningful during the download phase (Total < 0 = unknown).
+type updateProgress struct {
+	Phase   string
+	Written int64
+	Total   int64
+}
+
 // applyUpdate downloads the platform asset for rel, extracts it into a temp
 // staging dir, and hands off to replaceAndRelaunch. progress, when non-nil,
-// receives download fractions in [0,1] (total < 0 means unknown length);
-// callers invoke this from a goroutine and marshal progress updates onto
-// the UI thread themselves.
-func applyUpdate(ctx context.Context, client *http.Client, rel releaseInfo, progress func(frac float64)) error {
+// receives phase-tagged updates; callers invoke this from a goroutine and
+// marshal progress updates onto the UI thread themselves.
+func applyUpdate(ctx context.Context, client *http.Client, rel releaseInfo, progress func(updateProgress)) error {
 	assetName := updateAssetName()
 	if assetName == "" {
 		return fmt.Errorf("this platform has no release asset")
@@ -208,22 +218,18 @@ func applyUpdate(ctx context.Context, client *http.Client, rel releaseInfo, prog
 	zipPath := filepath.Join(tmp, assetName)
 	if err := downloadFile(ctx, client, url, zipPath, func(written, total int64) {
 		if progress != nil {
-			if total > 0 {
-				progress(float64(written) / float64(total))
-			} else {
-				progress(-1)
-			}
+			progress(updateProgress{Phase: "download", Written: written, Total: total})
 		}
 	}); err != nil {
 		return fmt.Errorf("download: %w", err)
-	}
-	if progress != nil {
-		progress(1)
 	}
 
 	extractDir := filepath.Join(tmp, "extracted")
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		return err
+	}
+	if progress != nil {
+		progress(updateProgress{Phase: "extract"})
 	}
 	if err := extractZip(zipPath, extractDir); err != nil {
 		return fmt.Errorf("extract: %w", err)
@@ -232,6 +238,9 @@ func applyUpdate(ctx context.Context, client *http.Client, rel releaseInfo, prog
 	stageDir := filepath.Join(tmp, "stage")
 	if err := os.MkdirAll(stageDir, 0755); err != nil {
 		return err
+	}
+	if progress != nil {
+		progress(updateProgress{Phase: "install"})
 	}
 	binaryName, err := stagePayload(extractDir, stageDir)
 	if err != nil {
