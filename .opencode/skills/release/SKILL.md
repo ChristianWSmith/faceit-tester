@@ -137,17 +137,20 @@ tag, and the release must all sit on this exact commit.
 ## Phase 4 — Download artifacts and publish
 
 1. **Download the artifact archives** into a scratch dir. `gh api` has no
-   `-o` flag, so redirect stdout (it prints the raw body):
+   `-o` flag, so redirect stdout (it prints the raw body). Resolve `$REPO`
+   from the repo working tree FIRST — gh's `{owner}/{repo}` placeholder
+   expansion (and `gh release create`'s repo inference) both fail outside
+   a git working tree:
    ```sh
+   REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
    mkdir -p /tmp/faceit-release && cd /tmp/faceit-release
-   gh api "repos/{owner}/{repo}/actions/runs/<RUN_ID>/artifacts" \
+   gh api "repos/$REPO/actions/runs/<RUN_ID>/artifacts" \
       --jq '.artifacts[] | [.id, .name] | @tsv' |
    while IFS=$'\t' read -r id name; do
-     gh api "repos/{owner}/{repo}/actions/artifacts/${id}/zip" > "${name}.zip"
+     gh api "repos/$REPO/actions/artifacts/${id}/zip" > "${name}.zip"
    done
    ```
-   `{owner}/{repo}` comes from `gh repo view --json nameWithOwner
-   --jq .nameWithOwner` (currently `ChristianWSmith/faceit-tester`).
+   (currently `ChristianWSmith/faceit-tester`).
    Verify three non-empty `.zip` files landed in the scratch dir —
    compare sizes against the `size_in_bytes` from the artifact listing
    in Phase 3 (they should match exactly; a short file means a
@@ -178,7 +181,8 @@ tag, and the release must all sit on this exact commit.
    changes (skip pure chore/docs commits unless notable). Show the notes
    to the user along with the version and asset list; **ask for final
    confirmation** before publishing.
-5. **Publish:**
+5. **Publish** (run from the repo working tree — repo inference needs a
+   git tree; or add `-R $REPO`):
    ```sh
    gh release create <X.Y.Z> \
      --title <X.Y.Z> \
@@ -188,9 +192,15 @@ tag, and the release must all sit on this exact commit.
      /tmp/faceit-release/faceit-tester-windows-amd64.exe.zip \
      /tmp/faceit-release/faceit-tester-macos.app.zip
    ```
-6. **Verify:** `gh release view <X.Y.Z>` shows the three assets and the
-   release is marked Latest. Clean up the scratch dir. Report the
-   release URL to the user.
+6. **Verify:**
+   ```sh
+   gh release view <X.Y.Z> --json tagName,isDraft,isPrerelease,url,assets \
+     --jq '{tagName, isDraft, isPrerelease, url, assets: [.assets[].name]}'
+   ```
+   Expect not-draft, not-prerelease, and the three assets (there is no
+   queryable `isLatest` field — GitHub marks the newest semver release
+   Latest automatically, see the gh quirks). Clean up the scratch dir.
+   Report the release URL to the user.
 
 The release is now live for the in-app updater: older semver installs
 see the new tag on their next launch (semver unconditionally supersedes
@@ -218,10 +228,18 @@ the retired date tags, so no install is stranded).
   wait.
 - **gh CLI quirks (seen on 2.102.1):** `gh run view --json artifacts`
   errors ("Unknown JSON field") — list artifacts via
-  `gh api .../runs/<ID>/artifacts` instead. `gh api` has no `-o` flag —
+  `gh api .../runs/<ID>/artifacts` instead. Same for
+  `gh release view --json isLatest` ("Unknown JSON field") — verify
+  releases with `isDraft`/`isPrerelease` + the asset list; Latest is
+  automatic for the newest non-prerelease. `gh api` has no `-o` flag —
   download binary bodies by redirecting stdout (`... > file.zip`), and
   sanity-check the byte size against the artifact's `size_in_bytes` so
-  an error page doesn't get saved as a fake zip.
+  an error page doesn't get saved as a fake zip. And both `gh api`
+  `{owner}/{repo}` placeholder expansion and `gh release create`'s repo
+  inference fail outside a git working tree ("unable to expand
+  placeholder ... not a git repository") — resolve `$REPO` before
+  cd'ing to a scratch dir, and run release create from the repo (or
+  pass `-R`).
 - **A failed run costs nothing but time:** no tag exists until the
   build is green, so fix forward and re-dispatch the *same* version.
   Never move or delete a published tag.
