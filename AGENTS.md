@@ -169,6 +169,30 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
 - **Some providers filter large ICMP payloads entirely** (NFO: 600-byte
   echo drops 100% at any rate; 56-byte clean at 64pps).
   `Server.ProbeSize` overrides the payload per server (0 = 600 default).
+- **Party ranking treats the ping target as the base reality.** Result
+  codes join servers by lowercased `Host` and carry hosts plus metrics
+  — nothing else — because `City.Provider` IDs are override-relative.
+  Display identity comes from the party leader's OWN active table
+  (`resolverFromTable` at Summarize time), so the tree shows the naming they
+  run; targets their list lacks land in the `Unknown` region named by
+  the host (DisplayName drops the dot for empty providers). Only
+  servers present in EVERY pasted run are ranked (intersection), with
+  the excluded count surfaced in the dialog.
+- **Result codes are versionless by design** — no version byte, one
+  `errNotResultCode` sentinel for every failure mode (base64, magic,
+  flate, truncation, trailing bytes). Changing the format breaks old
+  codes on purpose: update encode, decode and tests in one commit and
+  expect re-shares, not compatibility shims — users are expected to run
+  the latest app. A full embedded-list run must stay under 2000 chars
+  (Discord message limit; ~630 measured, pinned by
+  `TestResultCodeWithinDiscordBudget`); payload size is
+  value-independent (fixed-width metrics), so the number only moves
+  when the server list does.
+- **The party view is the same `resultsPane` on `mainColumns`** — codes
+  carry every metric now, so there is no column trim; decoded runs are
+  resolved into `partyEntry` identity *before* `buildParty`, which
+  assumes every run is already named (leaf naming is first-run-wins
+  and consistent because all runs resolve through the same table).
 - **Auto-update replaces the running binary via rename-first.** All three
   platforms allow renaming a running executable/bundle but not overwriting
   it, so `replaceAndRelaunch` (build-tagged per OS) renames old → `.old`,
@@ -236,11 +260,18 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   write-through on every keystroke (no pending-flush on navigation), and
   nothing touches prefs until Apply. First open clones the *effective*
   table, so the first Apply always stores a complete baseline + edits;
-  Cancel (or the dialog's close) discards everything. Delete snapshots
-  the row for a single-level **Undo delete** button (a new delete
-  overwrites the buffer). `+ Add region` / `+ City` create whole new
-  regions/cities via a one-field Form popup (validated: non-empty, no
-  "/", no duplicates) seeded with a placeholder server. Form fields carry
+  Cancel (or the dialog's close) discards everything. Destructive
+  actions (per-row/per-city/per-region trash buttons in the list, Reset
+  to Defaults) all confirm — there is no per-row undo; Cancel is the
+  only escape; destructive affordances live in the list, not the form
+  pane. Reset reloads the built-ins into the working copy (Apply
+  persists it as the list). `+ Add region` / `+ City` / `+ Provider`
+  create whole new regions/cities/servers via a one-field Form popup
+  (validated: non-empty, no "/", no duplicates) or a placeholder row.
+  City blocks stretch under `indentBlock` (Border-center), NOT
+  `indent` — indent's HBox sizes to min, which collapses interior
+  spacers and left-clumps the right-pinned add/delete buttons. Form
+  fields carry
   `HintText` explaining Max PPS / Probe size / Host / Scrubbed (Fyne has
   no tooltip API). `tableFromRows` strips zero-row regions (they would
   render as empty tree nodes). `applyServerTable` in main.go swaps the
@@ -277,11 +308,31 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   their worst-case aggregate in either direction with errors/n-a last
   in both — `sortedCityIndexes`/`rowCellLess`; providers always keep
   probe order because players choose locations, not providers, and
-  regions keep RegionOrder). `worstCase`
-  is the shared column-wise worst merge (error-skip, scrubbed-RTT-only).
-  Tapping a
+  regions keep RegionOrder). `mergeOutcomes` is the shared
+  column-wise worst merge (error-skip, scrubbed-loss/jitter-skip) that
+  `worstCase` renders as a bold row; the party summary calls it directly
+  to merge one server's outcomes across players. Tapping a
   parent row toggles expansion via `toggleNode(rowRef)` (in-memory only;
   new runs start with regions expanded and cities collapsed).
+- `resultsview.go` — the reusable results table (`resultsPane`): header
+  of sort-toggle buttons over a `widget.Table`, both driven by a
+  `resultsTree`. Parameterized by `paneConfig`: `columns` (label +
+  sortMode per column — both views use `mainColumns`, the full six
+  metrics), `onLeaf` (main copies the row/shows the error; party opens
+  the per-player breakdown), `onLegend`, `unfocus`. `setTree` reserves
+  the Server column against a fully-expanded preview of the tree
+  (`reservedNameWidth` flips every branch open for one flatten, then
+  restores the expansion state) so revealing a branch never re-flows
+  the table. `refreshLayout` pushes the Server width to the TABLE
+  unconditionally — a "no change" short-circuit once left the body at
+  its old width while the header reserved more, so providers spilled
+  past the column and every header cell drifted (party summary fresh
+  panes reserved >floor immediately, which is how it surfaced).
+  Owns the
+  header/table/column-width plumbing that used to live in main.go
+  (`rebuildHeader`, `toggleSort`, `refreshLayout`); the header HBox
+  alignment rules (SizeNamePadding between cells, no outer Padded)
+  apply per pane.
 - `main.go` — Fyne UI: region→city→provider tri-state selection tree
   (collapsed by default, expansion persisted) with a **filter entry**
   (substring match on region/city/provider/host; whole city/region
@@ -302,27 +353,84 @@ the platform-native icon (Windows exe resource, macOS bundle, Linux
   (`expectedSends` from `probePacing`) into the overall value, because
   per-server-only steps (~1.4% of a 70-server run) are invisible; also
   a ▶ marker on the active leaf check,
-  and a throttled (~4/s) running-loss status line. Results table driven
-  by `flattenWithRefs()` with per-cell green/yellow/red grading; sortable
-  headers (tap a column to cycle inactive → worst-first/asc → opposite →
-  off; sorts a region's cities by their aggregate, never the providers);
-  tap a leaf
-  to copy its row or show the full error; tap a parent to toggle; no
-  caption/placeholder chrome above or inside the table — the status
-  label is the only prose; "?" legend
-  dialog explaining thresholds and n/a. Secondary actions live in a
-  labeled "Actions" drawer (constant text both states — only the icon
-  flips; "Hide" changed the button width and made the row jump):
-  Export CSV, Copy Summary, Edit Servers,
-  Identify, About. Keyboard shortcuts (canvas-level, Entry-gated):
-  Enter = Test, Esc = cancel/close drawer, Ctrl/Cmd+C = copy summary.
-  About shows the version + manual update check (the recovery path after
-  "Never"). All runner-goroutine UI updates go through `fyne.Do`.
+   and a throttled (~4/s) running-loss status line. The results table
+   itself is the reusable `resultsPane` (resultsview.go); main.go wires
+   it with `mainColumns` + copy/error leaf taps; sortable
+   headers (tap a column to cycle inactive → worst-first/asc → opposite →
+   off; sorts a region's cities by their aggregate, never the providers);
+   tap a leaf
+   to copy its row or show the full error; tap a parent to toggle; no
+   caption/placeholder chrome above or inside the table — the status
+   label is the only prose; "?" legend
+   dialog explaining thresholds and n/a. Secondary actions live in a
+   labeled "Actions" drawer (constant text both states — only the icon
+   flips; "Hide" changed the button width and made the row jump; its
+   bottom gap is re-measured on every open by `sizeDrawerGap` so the
+   progress bar strip can't steal the drawer's clearance and drop it
+   over the row):
+   Export CSV, Copy Summary, Party,
+   Edit Servers, Identify, About. **Party** (`onPartyTap`) is the
+   group summary flow in two dialogs: an input dialog with five
+   teammate slots (one spare) + include-my-run checkbox (default on)
+   whose text persists for the session only (`u.partySlots`, never
+   disk; **Clear** wipes it) and whose **Copy Code** button (hidden
+   with no run; `ContentCopyIcon`) shares the local run via
+   `encodeResultCode`, whose Summarize ingests `parsePartySlots` (resolved through
+   `resolverFromTable(u.servers)` — the party leader's own naming) →
+   `buildParty`, closes itself, and opens `showPartySummary`: a
+   full-view dialog (coverage + slot notes on top, a `mainColumns`
+   pane, leaf taps open the per-player breakdown with
+   p1/med/p99/jitter/loss per run + the raw host, "?" shows
+   `partyLegendContent`; Close sits alone right). The primary action
+   (Summarize) and Copy Code sit right; Close and Clear sit left —
+   the dialog convention: negative actions left, positive right (also
+   applied to Identify's Close/Look up, About, error-detail and
+   breakdown rows). Keyboard shortcuts (canvas-level, Entry-gated):
+   Enter = Test, Esc = cancel/close drawer, Ctrl/Cmd+C = copy summary.
+   About shows the version + manual update check (the recovery path after
+   "Never"). All runner-goroutine UI updates go through `fyne.Do`.
 - `csv.go` — export with 3-decimal ms precision (UI table shows 1) for the
   median/p1/p99/jitter columns plus `tested_at` (RFC 3339 run start,
   same value on every row of one export), `max_pps`/`probe_size`
   (0 = default), and a `notes` column (`icmp-scrubbed` for scrubbed
   rows, whose loss/jitter cells are blank).
+- `code.go` — the shareable *result code* codec: one finished run as
+  one pasteable string (`base64url( 'G' | dictHash | flate(payload, dict) )`
+  with `payload = uvarint n | n × (host | 9-byte bit-packed metrics)`).
+  Codes carry **ping targets plus every metric** (loss 10b @0.01% —
+  1023 is the ≥10.23% "dead" sentinel, decodes as 100; p1/med/p99 16b
+  @0.1ms; jitter 8b @0.5ms; scrubbed/errored 2b) and nothing else: the
+  host is the join key, and the decoder's own table names servers at
+  Summarize time. The preset dictionary holds the embedded list's hosts
+  (deterministic order, built at init); the fnv32a hash prefix picks
+  the decoder's matching dictionary, and a mismatch just inflates
+  without one — server-list updates shrink codes, never break them.
+  A full embedded-list run encodes to ~630 chars (pinned by
+  `TestResultCodeWithinDiscordBudget` < 2000 for Discord); payload size
+  is value-independent (fixed-width metrics), so the number only moves
+  when the server list does. Versionless by design: every failure maps
+  to the single `errNotResultCode` sentinel — a code from an
+  incompatible build is simply re-shared, never negotiated. If the
+  format ever changes, update encode+decode+tests in one commit.
+- `party.go` — the group-summary model (Fyne-free): `parsePartySlots`
+  validates the teammate slots (blank skip, duplicates noted and
+  dropped, invalid reported by slot number; `resultCode` extracts a
+  code from messy pastes — whitespace-stripped fast path, then a
+  rejoin of the base64url tokens ≥16 chars plus a short-tail candidate
+  for arbitrary wrap widths, so a Copy Summary dump or chat preamble
+  glued to the code doesn't kill the paste), `resolverFromTable` +
+  `resolvePartyEntries` name decoded hosts from the party leader's OWN
+  active table (unknown targets land in the `Unknown` region named by
+  the host — DisplayName drops the dot for empty providers),
+  `partyRunFromOutcomes` wraps the local run without a code round-trip,
+  and `buildParty` intersects runs by lowercased host (only servers
+  present in EVERY run are ranked; `partyStats` counts the exclusions
+  the dialog warns about), merges each shared host with `mergeOutcomes`
+  (column-wise worst across players; leaf `Scrubbed = !measurable` keeps
+  the worstCase render contract), and inserts leaves in the first run's
+  order (my run first = RegionOrder-first probe order). `members`
+  (host → per-player outcomes) backs the breakdown dialog;
+  `partyCoverageLine` renders the runs/ranked/excluded summary.
 - `identify.go` — "Identify" dialog backend: `parseConnect` is
   deliberately loose (scans pasted text for `connect <addr>`, any IP
   token, or a whole-input hostname — port/semicolon/keyword all

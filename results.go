@@ -255,14 +255,18 @@ func indentPrefix(depth int) string {
 	return strings.Repeat("    ", depth)
 }
 
-// worstCase renders one branch aggregate row: column-by-column worst
-// values across the branch's outcomes (players cannot choose their
-// provider, so this is what they might actually get). Errored outcomes
-// are skipped for the numeric columns; if every outcome errored, the
-// first error is shown. Scrubbed outcomes contribute their RTT columns
-// but never jitter/loss (those show n/a unless a measurable outcome
-// exists). The name cell is bold.
-func worstCase(name string, outcomes []ServerOutcome) []tableCell {
+// mergeOutcomes merges a sibling group of outcomes into one column-wise
+// worst case: the maximum Recv/Median/P1/P99 over non-errored outcomes,
+// and the maximum Jitter/LossPercent over non-scrubbed outcomes (a
+// scrubbed endpoint reports the scrubber, not the path). Errored
+// outcomes contribute nothing numeric; if every outcome errored (or the
+// group is empty), the result carries the first error instead. The
+// second return reports whether loss/jitter were measurable from at
+// least one non-scrubbed outcome.
+//
+// This is also the party view's cross-player merge: one outcome per
+// player per server, worst column-wise across the group.
+func mergeOutcomes(outcomes []ServerOutcome) (PingResult, bool) {
 	var worst PingResult
 	have := false
 	haveMeasurable := false
@@ -308,11 +312,18 @@ func worstCase(name string, outcomes []ServerOutcome) []tableCell {
 		}
 	}
 	if !have {
-		row := resultRow(name, PingResult{Err: firstErr}, false)
-		row[0].bold = true
-		return row
+		return PingResult{Err: firstErr}, false
 	}
-	row := resultRow(name, worst, !haveMeasurable)
+	return worst, haveMeasurable
+}
+
+// worstCase renders one branch aggregate row: column-by-column worst
+// values across the branch's outcomes (players cannot choose their
+// provider, so this is what they might actually get) via mergeOutcomes.
+// The name cell is bold.
+func worstCase(name string, outcomes []ServerOutcome) []tableCell {
+	worst, measurable := mergeOutcomes(outcomes)
+	row := resultRow(name, worst, !measurable)
 	row[0].bold = true
 	return row
 }

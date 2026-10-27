@@ -23,7 +23,6 @@ func TestFilterDoesNotResizeWindow(t *testing.T) {
 		regionBy: map[string]string{},
 		state:    map[string]bool{},
 		expanded: map[string]bool{},
-		tree:     newResultsTree(),
 	}
 	for region, srvs := range embeddedServers {
 		for _, s := range srvs {
@@ -84,7 +83,6 @@ func TestFilterFromCollapsedDoesNotGrowMin(t *testing.T) {
 		regionBy: map[string]string{},
 		state:    map[string]bool{},
 		expanded: map[string]bool{}, // fresh launch: everything collapsed
-		tree:     newResultsTree(),
 	}
 	for region, srvs := range embeddedServers {
 		for _, s := range srvs {
@@ -143,7 +141,6 @@ func TestScrollMinNeverFollowsContent(t *testing.T) {
 		regionBy: map[string]string{},
 		state:    map[string]bool{},
 		expanded: map[string]bool{},
-		tree:     newResultsTree(),
 	}
 	for region, srvs := range embeddedServers {
 		for _, s := range srvs {
@@ -177,7 +174,6 @@ func TestFilterHidesWholeBlocks(t *testing.T) {
 		regionBy: map[string]string{},
 		state:    map[string]bool{},
 		expanded: map[string]bool{},
-		tree:     newResultsTree(),
 	}
 	for region, srvs := range embeddedServers {
 		for _, s := range srvs {

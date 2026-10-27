@@ -35,8 +35,13 @@ func (s Server) ID() string {
 	return s.City + "." + s.Provider
 }
 
-// DisplayName is shown in the results table.
+// DisplayName is shown in the results table. Party-view leaves for
+// hosts the ranker's table doesn't name have an empty Provider and
+// render as the host itself (City).
 func (s Server) DisplayName() string {
+	if s.Provider == "" {
+		return s.City
+	}
 	return s.City + "." + s.Provider
 }
 

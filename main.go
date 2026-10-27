@@ -89,16 +89,17 @@ type ui struct {
 	restartBtn    *widget.Button
 	exportBtn     *widget.Button
 	copyBtn       *widget.Button
+	partyBtn      *widget.Button
 	editBtn       *widget.Button
 	identifyBtn   *widget.Button
 	aboutBtn      *widget.Button
 	drawerBtn     *widget.Button  // toggles the secondary-actions drawer
 	drawerLayer   *fyne.Container // floating drawer: catcher + action column
+	drawerGap     *fyne.Container // sized spacer under the drawer column (sizeDrawerGap)
 	statusLabel   *widget.Label
 	progress      *widget.ProgressBar // thin full-width strip under the bottom row
 	expectedSends int                 // current server's planned probe count (UI-thread only)
-	table         *widget.Table
-	headerRow     *fyne.Container // results column headers; col 0 width tracks content
+	pane          *resultsPane        // results header + table (resultsview.go)
 	split         *container.Split
 
 	servers  map[string][]Server
@@ -116,11 +117,9 @@ type ui struct {
 	syncing   bool
 	filtering bool // filter is active: expanders no-op, parent checks disable
 
-	rows       [][]tableCell
-	rowRefs    []rowRef        // parallel to rows: leaf outcomes / branch identity for taps
-	tree       *resultsTree    // hierarchical results model backing rows
-	results    []ServerOutcome // full outcomes for CSV export
+	results    []ServerOutcome // full outcomes for CSV export / result codes
 	lastRun    time.Time       // start time of the most recent run (banner + CSV tested_at)
+	partySlots [5]string       // party-dialog code slots, kept for the session (UI-thread only)
 	running    bool
 	cancelling bool
 	cancel     context.CancelFunc
@@ -132,8 +131,6 @@ type ui struct {
 	totalCount int
 	activeID   string            // server ID currently being probed (tree marker)
 	checkTexts map[string]string // original leaf check texts, restored when the marker moves
-
-	nameColWidth float32 // current Server column width (0 = unset)
 }
 
 func main() {
@@ -244,7 +241,6 @@ pending release.
 		regionBy: regionBy,
 		state:    state,
 		expanded: expanded,
-		tree:     newResultsTree(),
 	}
 	u.build()
 	if *testSpec != "" {
@@ -564,44 +560,17 @@ func (u *ui) onUpdateConfirm(rel releaseInfo) {
 func (u *ui) build() {
 	u.treePane = u.buildTreePane()
 
-	u.statusLabel = widget.NewLabel("Select servers, then press Test. Export, Edit and Identify live under Actions.")
+	u.statusLabel = widget.NewLabel("Select servers, then press Test. Export, Edit, Identify and Party live under Actions.")
 	u.statusLabel.Wrapping = fyne.TextWrapWord
 
 	u.progress = widget.NewProgressBar()
 	u.progress.Hide()
 
-	u.table = widget.NewTable(
-		func() (int, int) { return len(u.rows), 6 },
-		func() fyne.CanvasObject { return widget.NewLabel("0000.0") },
-		func(id widget.TableCellID, cell fyne.CanvasObject) {
-			label := cell.(*widget.Label)
-			if id.Row < len(u.rows) && id.Col < len(u.rows[id.Row]) {
-				c := u.rows[id.Row][id.Col]
-				label.Importance = c.imp
-				label.TextStyle = fyne.TextStyle{Bold: c.bold}
-				label.SetText(c.text)
-			} else {
-				label.Importance = widget.MediumImportance
-				label.TextStyle = fyne.TextStyle{}
-				label.SetText("")
-			}
-		},
-	)
-	// Same widths the header row uses; col 0 is re-measured by
-	// refreshTableLayout once rows exist.
-	u.table.SetColumnWidth(0, minNameColWidth)
-	for i := 1; i < 6; i++ {
-		u.table.SetColumnWidth(i, metricColWidth)
-	}
-	// Tapping a region/city row toggles its children; tapping a leaf
-	// copies the row or shows its full error (onResultRowTap). Unselect
-	// immediately so no row stays highlighted, and unfocus: Table.Tapped
-	// focuses the table, which would swallow canvas bare-key shortcuts.
-	u.table.OnSelected = func(id widget.TableCellID) {
-		u.onResultRowTap(id)
-		u.table.UnselectAll()
-		u.unfocus()
-	}
+	u.pane = newResultsPane(paneConfig{
+		onLeaf:   u.onResultLeafTap,
+		onLegend: u.showLegend,
+		unfocus:  u.unfocus,
+	})
 
 	u.testBtn = widget.NewButton("Test", u.onTestTap)
 	u.testBtn.Importance = widget.SuccessImportance // green = start
@@ -613,6 +582,12 @@ func (u *ui) build() {
 	// text table — the paste-into-Discord companion to Export CSV.
 	u.copyBtn = widget.NewButtonWithIcon("Copy Summary", theme.ContentCopyIcon(), u.onCopySummaryTap)
 	u.copyBtn.Disable()
+
+	// Party opens the group summary flow (onPartyTap): paste teammates'
+	// result codes, include your own run, see the worst-case-across-players
+	// tree. Always enabled — it works from pasted codes alone, like
+	// Identify. Copy Code lives inside that dialog, not here.
+	u.partyBtn = widget.NewButtonWithIcon("Party", theme.ListIcon(), u.onPartyTap)
 
 	// Opens the custom-list editor (editor.go): per-server form on the
 	// left-pane selection, Apply persists to prefs, Drop restores the
@@ -648,14 +623,11 @@ func (u *ui) build() {
 }
 
 func (u *ui) content() fyne.CanvasObject {
-	// The table's findX inserts SizeNamePadding between columns, so the
-	// header HBox (which pads between children with theme.Padding =
-	// SizeNamePadding) matches column-for-column. No outer Padded wrapper:
+	// The pane's header is a plain HBox: findX inserts SizeNamePadding
+	// between table columns, so the header must pad between children
+	// (theme.Padding = SizeNamePadding) with no outer Padded wrapper —
 	// the table body starts at x=0.
-	u.headerRow = container.NewHBox()
-	u.rebuildHeader(minNameColWidth)
-
-	tableArea := container.NewBorder(u.headerRow, nil, nil, nil, u.table)
+	tableArea := u.pane.content()
 
 	// Tree left, results right; draggable divider. The tree sits in a
 	// stack holder so applyServerTable can swap in a rebuilt tree without
@@ -689,15 +661,19 @@ func (u *ui) content() fyne.CanvasObject {
 	// uses for popups) so the drawer reads as a container, not loose
 	// floating controls.
 	catcher := newTapCatcher(u.hideDrawer)
-	actions := container.NewPadded(container.NewVBox(u.exportBtn, u.copyBtn, u.editBtn, u.identifyBtn, u.aboutBtn))
+	actions := container.NewPadded(container.NewVBox(u.exportBtn, u.copyBtn, u.partyBtn, u.editBtn, u.identifyBtn, u.aboutBtn))
 	backdrop := canvas.NewRectangle(theme.Color(theme.ColorNameOverlayBackground))
 	backdrop.CornerRadius = theme.Size(theme.SizeNamePopupRadius)
 	panel := container.NewStack(backdrop, actions)
 	rightCol := container.NewBorder(nil, panel, nil, nil, nil)
-	gap := container.NewGridWrap(
+	// The gap lifts the drawer column over whatever occupies the window
+	// bottom — the control row, plus the progress bar while a run is in
+	// flight. It's re-sized on every open (sizeDrawerGap); a stale gap
+	// would float the drawer down over the row it's meant to clear.
+	u.drawerGap = container.NewStack(container.NewGridWrap(
 		fyne.NewSize(1, u.drawerBtn.MinSize().Height+2*theme.Padding()),
-		widget.NewLabel(""))
-	cluster := container.NewBorder(nil, gap, nil, rightCol, nil)
+		widget.NewLabel("")))
+	cluster := container.NewBorder(nil, u.drawerGap, nil, rightCol, nil)
 	u.drawerLayer = container.NewStack(catcher, cluster)
 	u.drawerLayer.Hide()
 
@@ -707,7 +683,7 @@ func (u *ui) content() fyne.CanvasObject {
 // onDrawerTap toggles the secondary-actions drawer. The arrow icon points
 // the way the drawer will move: up to open, down while open. The button
 // text stays "Actions" in both states — swapping to "Hide" changed the
-// button's width and made the whole bottom row jump. Dismissal always
+// button width and made the whole bottom row jump. Dismissal always
 // goes through hideDrawer (the catcher taps it directly), so the icon
 // can never get out of sync with the drawer's actual visibility.
 func (u *ui) onDrawerTap() {
@@ -715,8 +691,22 @@ func (u *ui) onDrawerTap() {
 		u.hideDrawer()
 		return
 	}
+	u.sizeDrawerGap()
 	u.drawerLayer.Show()
 	u.drawerBtn.SetIcon(theme.MoveDownIcon())
+}
+
+// sizeDrawerGap re-gaps the drawer column over the current window-bottom
+// band: the control row, plus the progress bar while a run is in flight
+// (the progress strip otherwise steals the gap's space and the drawer
+// lands on top of the Actions button).
+func (u *ui) sizeDrawerGap() {
+	h := u.drawerBtn.MinSize().Height + 2*theme.Padding()
+	if u.progress != nil && u.progress.Visible() {
+		h += u.progress.MinSize().Height
+	}
+	u.drawerGap.RemoveAll()
+	u.drawerGap.Add(container.NewGridWrap(fyne.NewSize(1, h), widget.NewLabel("")))
 }
 
 func (u *ui) hideDrawer() {
@@ -724,108 +714,17 @@ func (u *ui) hideDrawer() {
 	u.drawerBtn.SetIcon(theme.MoveUpIcon())
 }
 
-const (
-	// minNameColWidth is the floor for the Server column; it grows to fit
-	// the widest name cell currently rendered (deep tree labels).
-	minNameColWidth = 170
-	// metricColWidth is the fixed width of the five metric columns; sized
-	// for the widest header ("Ping (med)" ≈ 83px padded) with slack for
-	// platform font metrics.
-	metricColWidth = float32(90)
-)
-
-// headerSortMode maps each results-table column to the sortMode its
-// header cell toggles (0 = no sort for that column).
-var headerSortMode = map[int]sortMode{
-	0: sortName,
-	1: sortWorstP1,
-	2: sortWorstMedian,
-	3: sortWorstP99,
-	4: sortWorstJitter,
-	5: sortWorstLoss,
-}
-
-// rebuildHeader recreates the header labels as sort-toggle buttons,
-// sizing the Server column to nameWidth so it stays aligned with the
-// table's dynamic first column. An active sort shows its direction (▾
-// descending/worst-first, ▴ ascending/best-first). A trailing "?" button
-// opens the color legend; it sits after the six aligned cells and does
-// not affect column spacing.
-func (u *ui) rebuildHeader(nameWidth float32) {
-	u.headerRow.RemoveAll()
-	headers := []struct {
-		text  string
-		width float32
-	}{
-		// "Ping" is the gamer term for RTT and implies milliseconds; the
-		// suffix says which statistic of the reply samples it is.
-		{"Server", nameWidth}, {"Ping (p1)", metricColWidth}, {"Ping (med)", metricColWidth},
-		{"Ping (p99)", metricColWidth}, {"Jitter", metricColWidth}, {"Loss", metricColWidth},
-	}
-	for i, h := range headers {
-		col := i
-		label := h.text
-		if u.tree != nil && u.tree.mode == headerSortMode[col] {
-			if u.tree.desc {
-				label += " ▾"
-			} else {
-				label += " ▴"
-			}
-		}
-		btn := widget.NewButton(label, func() { u.toggleSort(col) })
-		btn.Importance = widget.LowImportance
-		btn.Alignment = widget.ButtonAlignLeading
-		u.headerRow.Add(container.NewGridWrap(fyne.NewSize(h.width, btn.MinSize().Height), btn))
-	}
-	// Spacer pins the legend to the row's right edge when the pane is
-	// wider than the columns. It contributes nothing to MinSize (spacers
-	// are skipped there), so the pane/window min is exactly the six
-	// cells + the button — no resize-on-layout risk.
-	u.headerRow.Add(layout.NewSpacer())
-	legendBtn := widget.NewButtonWithIcon("", theme.QuestionIcon(), u.showLegend)
-	legendBtn.Importance = widget.LowImportance
-	u.headerRow.Add(legendBtn)
-}
-
-// toggleSort cycles one column through three states: inactive → first
-// direction → opposite direction → inactive. First direction is
-// descending (worst-first) for metric columns — the app's whole point
-// is surfacing problem locations — and ascending for Server (A→Z).
-// The sort ranks a region's cities by their worst-case aggregate;
-// providers keep probe order and regions keep RegionOrder.
-func (u *ui) toggleSort(col int) {
-	if u.tree == nil {
-		return
-	}
-	mode := headerSortMode[col]
-	firstDesc := mode != sortName
-	switch {
-	case u.tree.mode != mode:
-		u.tree.setSort(mode, firstDesc)
-	case u.tree.desc == firstDesc:
-		u.tree.setSort(mode, !firstDesc)
-	default:
-		u.tree.setSort(sortProbeOrder, false)
-	}
-	u.rows, u.rowRefs = u.tree.flattenWithRefs()
-	u.rebuildHeader(u.nameColWidth)
-	u.refreshTableLayout()
-}
-
-// legendContent builds the legend dialog body: color thresholds, then
-// a compact glossary. Section gaps are 6px GridWrap rows — full-height
-// empty labels made the spacing read as double line breaks and pushed
-// the content past the scroll viewport (a scrollbar on open).
-func legendContent() fyne.CanvasObject {
+// legendThresholds returns the shared prefix of both legend bodies: the
+// three graded color rows. Section gaps are 6px GridWrap rows —
+// full-height empty labels made the spacing read as double line breaks
+// and pushed the content past the scroll viewport (a scrollbar on open).
+func legendThresholds() []fyne.CanvasObject {
 	line := func(text string, imp widget.Importance) *widget.Label {
 		l := widget.NewLabel(text)
 		l.Importance = imp
 		return l
 	}
-	gap := func() fyne.CanvasObject {
-		return container.NewGridWrap(fyne.NewSize(1, 6), widget.NewLabel(""))
-	}
-	return container.NewVBox(
+	return []fyne.CanvasObject{
 		widget.NewLabel("Color thresholds (CS2 HUD)"),
 		line(fmt.Sprintf("  green   ping < %dms · jitter < %dms · loss < %g%%",
 			int(pingWarnThreshold/time.Millisecond), int(jitterWarnThreshold/time.Millisecond),
@@ -834,15 +733,57 @@ func legendContent() fyne.CanvasObject {
 			int(pingThreshold/time.Millisecond), int(jitterThreshold/time.Millisecond),
 			lossThreshold), widget.WarningImportance),
 		line("  red     above those", widget.DangerImportance),
-		gap(),
+		legendGap(),
+	}
+}
+
+// legendGap is the 6px section spacer shared by both glossaries.
+func legendGap() fyne.CanvasObject {
+	return container.NewGridWrap(fyne.NewSize(1, 6), widget.NewLabel(""))
+}
+
+// legendContent builds the run-results legend: thresholds, then the
+// six-column glossary.
+func legendContent() fyne.CanvasObject {
+	objs := legendThresholds()
+	return container.NewVBox(append(objs,
 		widget.NewLabel("Ping columns are p1 / median / p99 percentiles of reply RTTs.\n"+
 			"Bold region/city rows are worst-case aggregates."),
-		gap(),
+		legendGap(),
 		widget.NewLabel("  n/a     DDoS-scrubbed endpoint — RTT is valid; loss and\n"+
 			"          jitter are not measurable."),
 		widget.NewLabel("  error   probe failed — tap the row for the full error\n"+
 			"          (Export CSV carries it too)."),
-	)
+	)...)
+}
+
+// partyLegendContent is the party view's glossary: same columns and
+// thresholds as the main legend, but the bold rows are the worst across
+// the party's runs and errors expand into the per-player breakdown.
+func partyLegendContent() fyne.CanvasObject {
+	objs := legendThresholds()
+	return container.NewVBox(append(objs,
+		widget.NewLabel("Ping columns are p1 / median / p99 percentiles of reply RTTs.\n"+
+			"Bold region/city rows are the worst result across your party's runs."),
+		legendGap(),
+		widget.NewLabel("  n/a     DDoS-scrubbed endpoint — RTT is valid; loss and\n"+
+			"          jitter are not measurable (no run can report them)."),
+		widget.NewLabel("  error   the probe failed on every run — tap the row to\n"+
+			"          see which runs failed."),
+	)...)
+}
+
+// showLegendDialog is the shared legend-dialog plumbing (title + body +
+// Close); showLegend and the party dialog's "?" both route here.
+func (u *ui) showLegendDialog(title string, body fyne.CanvasObject) {
+	scroll := container.NewVScroll(body)
+	scroll.SetMinSize(fyne.NewSize(400, body.MinSize().Height))
+	closeBtn := widget.NewButton("Close", nil)
+	buttons := container.NewHBox(layout.NewSpacer(), closeBtn)
+	d := dialog.NewCustomWithoutButtons(title, container.NewBorder(nil, buttons, nil, nil, scroll), u.window)
+	closeBtn.OnTapped = func() { d.Hide() }
+	d.Resize(fyne.NewSize(440, 0))
+	d.Show()
 }
 
 // showLegend explains the green/yellow/red grading and the n/a scrubbed
@@ -854,45 +795,7 @@ func legendContent() fyne.CanvasObject {
 // natural height so the dialog opens without a scrollbar; the scroll
 // itself remains only as a safety net on tiny screens.
 func (u *ui) showLegend() {
-	body := legendContent()
-	scroll := container.NewVScroll(body)
-	scroll.SetMinSize(fyne.NewSize(400, body.MinSize().Height))
-	closeBtn := widget.NewButton("Close", nil)
-	buttons := container.NewHBox(layout.NewSpacer(), closeBtn)
-	d := dialog.NewCustomWithoutButtons("Legend", container.NewBorder(nil, buttons, nil, nil, scroll), u.window)
-	closeBtn.OnTapped = func() { d.Hide() }
-	d.Resize(fyne.NewSize(440, 0))
-	d.Show()
-}
-
-// refreshTableLayout re-measures the name column against u.rows, updates
-// the table and header widths when it changed, and repaints. Call after
-// every rows rebuild.
-func (u *ui) refreshTableLayout() {
-	w := nameColumnWidth(u.rows)
-	if w != u.nameColWidth {
-		u.nameColWidth = w
-		u.table.SetColumnWidth(0, w)
-		u.rebuildHeader(w)
-	}
-	u.table.Refresh()
-}
-
-// nameColumnWidth returns the width needed for the widest name cell in
-// rows (bold parents measured bold), floored at minNameColWidth.
-func nameColumnWidth(rows [][]tableCell) float32 {
-	w := float32(minNameColWidth)
-	for _, row := range rows {
-		if len(row) == 0 {
-			continue
-		}
-		tw := fyne.MeasureText(row[0].text, theme.TextSize(), fyne.TextStyle{Bold: row[0].bold})
-		// Label padding on both sides plus a hair of slack.
-		if cw := tw.Width + 2*theme.Padding() + 2; cw > w {
-			w = cw
-		}
-	}
-	return w
+	u.showLegendDialog("Legend", legendContent())
 }
 
 // buildTree constructs the region → city → provider tree, all collapsed.
@@ -1299,6 +1202,15 @@ func indent(obj fyne.CanvasObject) fyne.CanvasObject {
 	)
 }
 
+// indentBlock is indent for objects that need to stretch to the full
+// list width (the editor's city blocks, whose header buttons pin
+// right): indent's HBox sizes to min, which collapses interior spacers
+// and left-clumps the buttons.
+func indentBlock(obj fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewBorder(nil, nil,
+		container.NewGridWrap(fyne.NewSize(28, 1), widget.NewLabel("")), nil, obj)
+}
+
 // setTriState applies an (all, some) aggregate to a parent checkbox without
 // firing OnChanged. Tapping a partial check later fires OnChanged(true),
 // which the parent handler treats as select-all.
@@ -1406,12 +1318,9 @@ func (u *ui) applyServerTable(servers map[string][]Server, status string) {
 	u.treeHolder.RemoveAll()
 	u.treeHolder.Add(container.NewPadded(u.treePane))
 
-	u.tree = newResultsTree()
-	u.rows = nil
-	u.rowRefs = nil
+	u.pane.setTree(newResultsTree())
 	u.results = nil
 	u.lastRun = time.Time{}
-	u.refreshTableLayout()
 	u.exportBtn.Disable()
 	u.copyBtn.Disable()
 	u.statusLabel.SetText(status)
@@ -1443,9 +1352,7 @@ func (u *ui) onTestTap() {
 		return
 	}
 
-	u.tree = newResultsTree()
-	u.rows = nil
-	u.rowRefs = nil
+	u.pane.setTree(newResultsTree())
 	u.results = nil
 	u.lastRun = time.Now()
 	u.runStarted = u.lastRun
@@ -1453,7 +1360,6 @@ func (u *ui) onTestTap() {
 	u.totalCount = len(selected)
 	u.expectedSends = 0
 	u.eta = 0
-	u.refreshTableLayout()
 	u.setRunning(true)
 	u.statusLabel.SetText(fmt.Sprintf("Testing (0/%d)...", u.totalCount))
 
@@ -1527,7 +1433,7 @@ func (u *ui) onTestTap() {
 			func(outcome ServerOutcome) {
 				fyne.Do(func() {
 					u.results = append(u.results, outcome)
-					u.tree.addOutcome(u.regionBy[outcome.Server.ID()], outcome)
+					u.pane.addOutcome(u.regionBy[outcome.Server.ID()], outcome)
 					u.doneCount++
 					// Average per-server duration so far drives the ETA;
 					// early failures make it shrink faster than the naive
@@ -1537,8 +1443,6 @@ func (u *ui) onTestTap() {
 						u.eta = time.Duration(float64(elapsed) / float64(u.doneCount) * float64(u.totalCount-u.doneCount))
 					}
 					u.progress.SetValue(float64(u.doneCount) / float64(u.totalCount))
-					u.rows, u.rowRefs = u.tree.flattenWithRefs()
-					u.refreshTableLayout()
 				})
 			},
 		)
@@ -1707,23 +1611,10 @@ func (u *ui) onExportTap() {
 	d.Show()
 }
 
-// onResultRowTap dispatches a results-table row tap: parent rows toggle
-// expansion, error rows show the full error, healthy leaf rows copy the
-// row line to the clipboard. The dispatcher keeps the semantics in one
-// place as the tap behaviors grow.
-func (u *ui) onResultRowTap(id widget.TableCellID) {
-	if id.Row < 0 || id.Row >= len(u.rowRefs) {
-		return
-	}
-	ref := u.rowRefs[id.Row]
-	if !ref.leaf {
-		if u.tree.toggleNode(ref) {
-			u.rows, u.rowRefs = u.tree.flattenWithRefs()
-			u.refreshTableLayout()
-		}
-		return
-	}
-	outcome := ref.outcome
+// onResultLeafTap handles a results-table leaf tap: error rows show the
+// full error, healthy rows copy the row line to the clipboard. Branch
+// (region/city) taps toggle expansion inside resultsPane.
+func (u *ui) onResultLeafTap(outcome ServerOutcome) {
 	if outcome.Result.Err != nil {
 		u.showErrorDetail(outcome)
 		return
@@ -1748,7 +1639,7 @@ func (u *ui) showErrorDetail(outcome ServerOutcome) {
 		}
 	})
 	closeBtn := widget.NewButton("Close", nil) // replaced below — declared for the row
-	buttons := container.NewHBox(copyBtn, layout.NewSpacer(), closeBtn)
+	buttons := container.NewHBox(closeBtn, layout.NewSpacer(), copyBtn)
 	body := container.NewBorder(nil, buttons, nil, nil, scroll)
 	d := dialog.NewCustomWithoutButtons("Probe failed", body, u.window)
 	closeBtn.OnTapped = func() { d.Hide() }
@@ -1789,7 +1680,7 @@ func (u *ui) onAboutTap() {
 		reEnableBtn.Hide()
 	}
 	closeBtn := widget.NewButton("Close", nil)
-	buttons := container.NewHBox(layout.NewSpacer(), reEnableBtn, checkBtn, closeBtn)
+	buttons := container.NewHBox(closeBtn, layout.NewSpacer(), reEnableBtn, checkBtn)
 	body := container.NewBorder(nil, buttons, nil, nil, bodyText)
 	d := dialog.NewCustomWithoutButtons("About", body, u.window)
 	closeBtn.OnTapped = func() { d.Hide() }
@@ -1992,8 +1883,6 @@ func (u *ui) onIdentifyTap() {
 	var (
 		d            *dialog.CustomDialog
 		lookupBtn    *widget.Button
-		cancelBtn    *widget.Button
-		copyBtn      *widget.Button
 		lookupCancel context.CancelFunc
 		lookupGen    int
 	)
@@ -2006,8 +1895,6 @@ func (u *ui) onIdentifyTap() {
 		lookupGen++
 		gen := lookupGen
 		lookupBtn.Disable()
-		cancelBtn.Enable()
-		copyBtn.Disable()
 		result.SetText("Looking up…")
 		ctx, cancel := context.WithCancel(context.Background())
 		lookupCancel = cancel
@@ -2019,37 +1906,13 @@ func (u *ui) onIdentifyTap() {
 				}
 				result.SetText(text)
 				lookupBtn.Enable()
-				cancelBtn.Disable()
-				copyBtn.Enable()
 				fitIdentifyDialog(d, scroll, result, text)
 			})
 		}()
 	})
 	lookupBtn.Importance = widget.HighImportance
-	cancelBtn = widget.NewButton("Cancel", func() {
-		lookupGen++ // invalidate the in-flight completion
-		if lookupCancel != nil {
-			lookupCancel()
-			lookupCancel = nil
-		}
-		result.SetText("Lookup cancelled.")
-		lookupBtn.Enable()
-		cancelBtn.Disable()
-		fitIdentifyDialog(d, scroll, result, result.Text)
-	})
-	cancelBtn.Disable()
-	copyBtn = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
-		if c := fyne.CurrentApp().Clipboard(); c != nil {
-			c.SetContent(result.Text)
-		}
-		copyBtn.SetText("Copied")
-		go func() {
-			time.Sleep(1500 * time.Millisecond)
-			fyne.Do(func() { copyBtn.SetText("Copy") })
-		}()
-	})
-	copyBtn.Disable()
 	closeBtn := widget.NewButton("Close", func() {
+		lookupGen++ // invalidate any in-flight completion
 		if lookupCancel != nil {
 			lookupCancel()
 		}
@@ -2057,11 +1920,205 @@ func (u *ui) onIdentifyTap() {
 	})
 
 	// Own the bottom row (WithoutButtons — NewCustom always renders a
-	// dismiss button, even with empty text): Close + Copy bottom-left,
-	// Cancel + Look up bottom-right, neither stretched.
-	buttons := container.NewHBox(closeBtn, copyBtn, layout.NewSpacer(), cancelBtn, lookupBtn)
+	// dismiss button, even with empty text): Close left, Look up right —
+	// negative action left, positive right (the dialog convention).
+	buttons := container.NewHBox(closeBtn, layout.NewSpacer(), lookupBtn)
 	body := container.NewBorder(nil, buttons, nil, nil, container.NewVBox(top, scroll))
 	d = dialog.NewCustomWithoutButtons("Identify server", body, u.window)
+	d.Show()
+}
+
+// onPartyTap opens the party input dialog: five slots for teammates'
+// result codes (a spare so the party can fill all five seats even
+// without the summarizer's own run) plus the include-my-run checkbox
+// defaulting on. Summarize ingests everything, closes this dialog, and
+// opens the full-view summary (showPartySummary) — the table needs the
+// room, so it doesn't share the paste slots. Every piece of logic past
+// the slots is party.go/code.go; these functions are wiring only.
+func (u *ui) onPartyTap() {
+	// Five single-line slots: codes are long single-line tokens; each
+	// row carries its own paste button (Identify's paste, per slot).
+	// Text persists for the app session (u.partySlots) — close and
+	// reopen the dialog and the pasted codes are still there; nothing
+	// touches disk.
+	entries := [5]*widget.Entry{}
+	slots := container.NewVBox()
+	for i := range entries {
+		e := widget.NewEntry()
+		e.SetPlaceHolder(fmt.Sprintf("Teammate %d result code", i+1))
+		e.SetText(u.partySlots[i])
+		idx := i
+		e.OnChanged = func(s string) { u.partySlots[idx] = s }
+		entries[i] = e
+		paste := widget.NewButtonWithIcon("", theme.ContentPasteIcon(), func(e *widget.Entry) func() {
+			return func() {
+				if c := fyne.CurrentApp().Clipboard(); c != nil {
+					e.SetText(c.Content())
+				}
+			}
+		}(e))
+		slots.Add(container.NewBorder(nil, nil, nil, paste, e))
+	}
+
+	includeChk := widget.NewCheck(
+		fmt.Sprintf("Include my last run (%d servers)", len(u.results)), nil)
+	includeChk.Checked = true
+	if len(u.results) == 0 {
+		includeChk.Hide() // nothing to include — and Checked must not count
+	}
+
+	// Notes report what blocked a Summarize (invalid/duplicate slots);
+	// anything that parses moves on to the summary dialog, which shows
+	// the coverage line there.
+	notesLabel := widget.NewLabel("")
+	notesLabel.Wrapping = fyne.TextWrapWord
+	notesLabel.Hide()
+
+	hint := widget.NewLabel("Paste result codes from up to 5 teammates, then Summarize.")
+	hint.Wrapping = fyne.TextWrapWord
+
+	// Declare before NewButton: closures reference the dialog itself
+	// (same scoping gotcha as the check tree).
+	var d *dialog.CustomDialog
+	var summarizeBtn *widget.Button
+	summarizeBtn = widget.NewButton("Summarize", func() {
+		texts := [5]string{}
+		for i, e := range entries {
+			texts[i] = e.Text
+		}
+		runs, notes := parsePartySlots(texts[:], resolverFromTable(u.servers))
+		if len(u.results) > 0 && includeChk.Checked {
+			runs = append([]partyRun{partyRunFromOutcomes("my run",
+				func(s Server) string { return u.regionBy[s.ID()] }, u.results)}, runs...)
+		}
+		if len(runs) == 0 {
+			// Nothing to summarize — stay open so the notes explain why.
+			notes = append(notes, "Paste at least one result code.")
+		}
+		if len(notes) > 0 {
+			notesLabel.SetText(strings.Join(notes, "\n"))
+			notesLabel.Show()
+		} else {
+			notesLabel.SetText("")
+			notesLabel.Hide()
+		}
+		if len(runs) == 0 {
+			return
+		}
+		tree, stats, members := buildParty(runs)
+		d.Hide()
+		u.showPartySummary(tree, stats, notes, members)
+	})
+	summarizeBtn.Importance = widget.HighImportance
+	closeBtn := widget.NewButton("Close", func() { d.Hide() })
+	clearBtn := widget.NewButton("Clear", func() {
+		for _, e := range entries {
+			e.SetText("") // fires OnChanged → clears the session slots too
+		}
+		notesLabel.SetText("")
+		notesLabel.Hide()
+	})
+	// Copy Code puts THIS run on the clipboard so a teammate can paste
+	// it back — the reason the button moved out of the drawer and in
+	// here. Hidden when there's no run to share. The label beside it is
+	// the copy feedback (the main status label is behind the dialog).
+	copyFeedback := widget.NewLabel("")
+	copyCodeBtn := widget.NewButtonWithIcon("Copy Code", theme.ContentCopyIcon(), func() {
+		if c := fyne.CurrentApp().Clipboard(); c != nil {
+			c.SetContent(encodeResultCode(u.results))
+			copyFeedback.SetText("Code copied.")
+			go func() {
+				time.Sleep(1500 * time.Millisecond)
+				fyne.Do(func() { copyFeedback.SetText("") })
+			}()
+		}
+	})
+	if len(u.results) == 0 {
+		copyCodeBtn.Hide()
+		copyFeedback.Hide()
+	}
+
+	top := container.NewVBox(slots, includeChk, notesLabel, hint)
+	// Negative actions left, positive right (Close/Clear | Copy Code /
+	// Summarize) — the app-wide dialog convention.
+	buttons := container.NewHBox(closeBtn, clearBtn, layout.NewSpacer(), copyFeedback, copyCodeBtn, summarizeBtn)
+	body := container.NewBorder(top, buttons, nil, nil, nil)
+	d = dialog.NewCustomWithoutButtons("Party", body, u.window)
+	d.Resize(fyne.NewSize(540, 0))
+	d.Show()
+}
+
+// showPartySummary opens the full-view party results dialog: the
+// cross-player worst-case tree with every column, coverage + slot
+// notes on top, leaf taps opening the per-player breakdown. Split from
+// the paste dialog (onPartyTap) so the table gets the room.
+func (u *ui) showPartySummary(tree *resultsTree, stats partyStats, notes []string, members map[string][]partyMember) {
+	pane := newResultsPane(paneConfig{
+		onLeaf:   func(o ServerOutcome) { u.showPartyBreakdown(o, members) },
+		onLegend: func() { u.showLegendDialog("Legend", partyLegendContent()) },
+		unfocus:  u.unfocus,
+	})
+	pane.setTree(tree)
+
+	statusText := partyCoverageLine(stats)
+	if len(notes) > 0 {
+		statusText += "\n" + strings.Join(notes, "\n")
+	}
+	status := widget.NewLabel(statusText)
+	status.Wrapping = fyne.TextWrapWord
+
+	// Declare before NewButton: the closure references the dialog.
+	var d *dialog.CustomDialog
+	closeBtn := widget.NewButton("Close", func() { d.Hide() })
+	buttons := container.NewHBox(layout.NewSpacer(), closeBtn)
+	body := container.NewBorder(status, buttons, nil, nil, pane.content())
+	d = dialog.NewCustomWithoutButtons("Party summary", body, u.window)
+	d.Resize(fyne.NewSize(840, 660))
+	d.Show()
+}
+
+// showPartyBreakdown shows every player's raw numbers for one ranked
+// row: the merged worst case is on the table, but the party picks the
+// server by seeing WHO is having a bad time there. Error runs show
+// "error" (codes carry a flag, not the original message).
+func (u *ui) showPartyBreakdown(o ServerOutcome, members map[string][]partyMember) {
+	ms := members[hostKey(o.Server.Host)]
+	if len(ms) == 0 {
+		return
+	}
+	var b strings.Builder
+	b.WriteString(o.Server.DisplayName())
+	b.WriteString(" — ")
+	b.WriteString(o.Server.Host)
+	for _, m := range ms {
+		r := m.outcome.Result
+		switch {
+		case r.Err != nil:
+			fmt.Fprintf(&b, "\n%s: error", m.label)
+		case m.outcome.Server.Scrubbed:
+			fmt.Fprintf(&b, "\n%s: p1 %s · med %s · p99 %s · jitter n/a · loss n/a (icmp-scrubbed)",
+				m.label, formatMS(r.P1), formatMS(r.Median), formatMS(r.P99))
+		default:
+			fmt.Fprintf(&b, "\n%s: p1 %s · med %s · p99 %s · jitter %s · loss %.2f%%",
+				m.label, formatMS(r.P1), formatMS(r.Median), formatMS(r.P99),
+				formatMS(r.Jitter), r.LossPercent)
+		}
+	}
+	text := widget.NewLabel(b.String())
+	text.Wrapping = fyne.TextWrapWord
+	scroll := container.NewVScroll(text)
+	scroll.SetMinSize(fyne.NewSize(460, 120))
+	copyBtn := widget.NewButton("Copy", func() {
+		if c := fyne.CurrentApp().Clipboard(); c != nil {
+			c.SetContent(text.Text)
+		}
+	})
+	closeBtn := widget.NewButton("Close", nil) // replaced below — declared for the row
+	buttons := container.NewHBox(closeBtn, layout.NewSpacer(), copyBtn)
+	body := container.NewBorder(nil, buttons, nil, nil, scroll)
+	d := dialog.NewCustomWithoutButtons("Party breakdown", body, u.window)
+	closeBtn.OnTapped = func() { d.Hide() }
+	d.Resize(fyne.NewSize(520, 0))
 	d.Show()
 }
 

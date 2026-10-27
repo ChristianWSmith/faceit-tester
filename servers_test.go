@@ -148,6 +148,12 @@ func TestServerIDAndDisplayName(t *testing.T) {
 	if s.DisplayName() != "San Jose.Dedicated.com" {
 		t.Errorf("DisplayName() = %q", s.DisplayName())
 	}
+	// Party-view leaves for hosts the ranker's table doesn't name carry
+	// an empty Provider and render as the bare target.
+	u := Server{City: "203.0.113.7", Host: "203.0.113.7"}
+	if u.DisplayName() != "203.0.113.7" {
+		t.Errorf("unnamed DisplayName() = %q, want the bare host", u.DisplayName())
+	}
 }
 
 // TestServerListMatchesFindings pins the embedded list to the packet-loss

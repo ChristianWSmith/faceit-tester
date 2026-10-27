@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 )
@@ -235,39 +234,35 @@ func TestSortedCityIndexes(t *testing.T) {
 // direction → inactive.
 func TestToggleSortCycle(t *testing.T) {
 	test.NewApp()
-	u := &ui{tree: newResultsTree(), headerRow: container.NewHBox()}
-	u.table = widget.NewTable(
-		func() (int, int) { return len(u.rows), 6 },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
-		func(widget.TableCellID, fyne.CanvasObject) {},
-	)
+	p := newResultsPane(paneConfig{})
+	p.setTree(newResultsTree())
 
 	// Metric column: desc → asc → off.
-	u.toggleSort(5) // Loss
-	if u.tree.mode != sortWorstLoss || !u.tree.desc {
-		t.Errorf("click 1 = (%v, desc=%v), want (worstLoss, desc=true)", u.tree.mode, u.tree.desc)
+	p.toggleSort(5) // Loss
+	if p.tree.mode != sortWorstLoss || !p.tree.desc {
+		t.Errorf("click 1 = (%v, desc=%v), want (worstLoss, desc=true)", p.tree.mode, p.tree.desc)
 	}
-	u.toggleSort(5)
-	if u.tree.mode != sortWorstLoss || u.tree.desc {
-		t.Errorf("click 2 = (%v, desc=%v), want (worstLoss, desc=false)", u.tree.mode, u.tree.desc)
+	p.toggleSort(5)
+	if p.tree.mode != sortWorstLoss || p.tree.desc {
+		t.Errorf("click 2 = (%v, desc=%v), want (worstLoss, desc=false)", p.tree.mode, p.tree.desc)
 	}
-	u.toggleSort(5)
-	if u.tree.mode != sortProbeOrder {
-		t.Errorf("click 3 = mode %v, want probe order", u.tree.mode)
+	p.toggleSort(5)
+	if p.tree.mode != sortProbeOrder {
+		t.Errorf("click 3 = mode %v, want probe order", p.tree.mode)
 	}
 	// A different column starts its own cycle, then a click back on an
 	// inactive column starts again (mode mismatch branch).
-	u.toggleSort(0) // Server
-	if u.tree.mode != sortName || u.tree.desc {
-		t.Errorf("Server click 1 = (%v, desc=%v), want (name, asc)", u.tree.mode, u.tree.desc)
+	p.toggleSort(0) // Server
+	if p.tree.mode != sortName || p.tree.desc {
+		t.Errorf("Server click 1 = (%v, desc=%v), want (name, asc)", p.tree.mode, p.tree.desc)
 	}
-	u.toggleSort(0)
-	if u.tree.mode != sortName || !u.tree.desc {
-		t.Errorf("Server click 2 = (%v, desc=%v), want (name, desc)", u.tree.mode, u.tree.desc)
+	p.toggleSort(0)
+	if p.tree.mode != sortName || !p.tree.desc {
+		t.Errorf("Server click 2 = (%v, desc=%v), want (name, desc)", p.tree.mode, p.tree.desc)
 	}
-	u.toggleSort(0)
-	if u.tree.mode != sortProbeOrder {
-		t.Errorf("Server click 3 = mode %v, want probe order", u.tree.mode)
+	p.toggleSort(0)
+	if p.tree.mode != sortProbeOrder {
+		t.Errorf("Server click 3 = mode %v, want probe order", p.tree.mode)
 	}
 }
 

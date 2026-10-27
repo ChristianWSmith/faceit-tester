@@ -140,32 +140,28 @@ func groupRowsByCity(rows []editRow) []rowGroup {
 
 // serverEditor is the custom-list dialog: a region → city → server list
 // on the left, a per-server form on the right. Nothing touches prefs
-// until Apply; Cancel discards the working copy wholesale (which is also
-// the undo for deletes — or use the single-level Undo button). The
-// working copy starts from the effective table — built-ins when no
-// custom list exists — so the first Apply always stores a complete
-// baseline plus the user's edits.
+// until Apply; Cancel discards the working copy wholesale. The working
+// copy starts from the effective table — built-ins when no custom list
+// exists — so the first Apply always stores a complete baseline plus
+// the user's edits. Reset to Defaults reloads the built-ins into the
+// working copy (still Apply to persist); destructive row actions
+// confirm first because the only undo is Cancel-everything.
 type serverEditor struct {
 	u       *ui
 	working map[string][]editRow
 	region  string // selected row's region; index < 0 = nothing selected
 	index   int
 
-	d          *dialog.CustomDialog
-	listBox    *fyne.Container
-	errLabel   *widget.Label
-	city       *widget.Entry
-	provider   *widget.Entry
-	host       *widget.Entry
-	maxPPS     *widget.Entry
-	probe      *widget.Entry
-	scrubbed   *widget.Check
-	deleteBtn  *widget.Button
-	undoBtn    *widget.Button
-	undoRegion string
-	undoIndex  int
-	undoRow    editRow
-	hasUndo    bool
+	d         *dialog.CustomDialog
+	listBox   *fyne.Container
+	errLabel  *widget.Label
+	city      *widget.Entry
+	provider  *widget.Entry
+	host      *widget.Entry
+	maxPPS    *widget.Entry
+	probe     *widget.Entry
+	scrubbed  *widget.Check
+	deleteBtn *widget.Button
 
 	// syncing guards write-through handlers while selectRow repopulates
 	// the form (SetText/SetChecked fire callbacks).
@@ -236,10 +232,6 @@ func (e *serverEditor) build() {
 		scrubItem,
 	)
 
-	e.deleteBtn = widget.NewButtonWithIcon("Delete Server", theme.DeleteIcon(), e.deleteSelected)
-	e.undoBtn = widget.NewButton("Undo delete", e.undoDelete)
-	e.undoBtn.Importance = widget.LowImportance
-	e.undoBtn.Disable()
 	e.errLabel = widget.NewLabel("")
 	e.errLabel.Importance = widget.DangerImportance
 	e.errLabel.Wrapping = fyne.TextWrapWord
@@ -249,18 +241,20 @@ func (e *serverEditor) build() {
 	header.Wrapping = fyne.TextWrapWord
 
 	// Cancel/Apply own the bottom row (NewCustomWithoutButtons — see the
-	// identify dialog); Drop sits opposite them while a custom list exists.
+	// identify dialog); Drop and Reset sit with the other negative
+	// actions on the left.
 	cancelBtn := widget.NewButton("Cancel", func() { e.d.Hide() })
 	applyBtn := widget.NewButton("Apply", e.apply)
-	applyBtn.Importance = widget.SuccessImportance // importance before first render
+	applyBtn.Importance = widget.HighImportance // blue primary; importance before first render
+	resetBtn := widget.NewButton("Reset to Defaults", e.resetTapped)
 	var btns []fyne.CanvasObject
 	if overrideActive(e.u.prefs) {
 		btns = append(btns, widget.NewButton("Drop Custom List", e.dropTapped))
 	}
-	btns = append(btns, layout.NewSpacer(), cancelBtn, applyBtn)
+	btns = append(btns, resetBtn, layout.NewSpacer(), cancelBtn, applyBtn)
 	buttons := container.NewHBox(btns...)
 
-	center := container.NewVBox(form, container.NewHBox(e.deleteBtn, e.undoBtn), e.errLabel)
+	center := container.NewVBox(form, e.errLabel)
 	body := container.NewBorder(header, buttons, scroll, nil, center)
 	e.d = dialog.NewCustomWithoutButtons("Edit servers", body, e.u.window)
 	e.d.Resize(fyne.NewSize(720, 560))
@@ -330,20 +324,22 @@ func (e *serverEditor) setFormEnabled(enabled bool) {
 	}
 	if enabled {
 		e.scrubbed.Enable()
-		e.deleteBtn.Enable()
 	} else {
 		e.scrubbed.Checked = false
 		e.scrubbed.Refresh()
 		e.scrubbed.Disable()
-		e.deleteBtn.Disable()
 	}
 	e.syncing = false
 }
 
 // rebuildList re-renders the left pane from the working copy; the
 // selected row is highlighted. Cheap at ~90 rows, and City/Provider
-// edits must re-render to stay in sync. Each region header carries a
-// "+ City" button; a top-level "+ Add region" creates whole regions.
+// edits must re-render to stay in sync. Region rows carry "+ City" and
+// a delete-region button; city rows carry "+ Provider" and a
+// delete-city button — both pinned to the right edge of the STRETCHED
+// row (indentBlock, not indent: an HBox-sized indent collapses the
+// spacer and left-clumps the buttons). A top-level "+ Add region"
+// creates whole regions.
 func (e *serverEditor) rebuildList() {
 	e.listBox.RemoveAll()
 	addRegionBtn := widget.NewButton("+ Add region", e.addRegionPrompt)
@@ -354,12 +350,17 @@ func (e *serverEditor) rebuildList() {
 		regionLabel.TextStyle = fyne.TextStyle{Bold: true}
 		addCityBtn := widget.NewButton("+ City", func() { e.addCityPrompt(region) })
 		addCityBtn.Importance = widget.LowImportance
-		e.listBox.Add(container.NewHBox(regionLabel, layout.NewSpacer(), addCityBtn))
+		deleteRegionBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() { e.deleteRegion(region) })
+		deleteRegionBtn.Importance = widget.LowImportance
+		e.listBox.Add(container.NewHBox(regionLabel, layout.NewSpacer(), addCityBtn, deleteRegionBtn))
 		for _, g := range groupRowsByCity(e.working[region]) {
 			cityLabel := widget.NewLabel(fmt.Sprintf("%s (%d)", g.City, len(g.Indexes)))
-			addBtn := widget.NewButton("+", func() { e.addServer(region, g.City) })
-			addBtn.Importance = widget.LowImportance
-			header := container.NewHBox(cityLabel, layout.NewSpacer(), addBtn)
+			addProviderBtn := widget.NewButton("+ Provider", func() { e.addServer(region, g.City) })
+			addProviderBtn.Importance = widget.LowImportance
+			deleteCityBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() { e.deleteCity(region, g.City) })
+			deleteCityBtn.Importance = widget.LowImportance
+			header := container.NewBorder(nil, nil, cityLabel,
+				container.NewHBox(addProviderBtn, deleteCityBtn))
 
 			block := container.NewVBox(header)
 			for _, idx := range g.Indexes {
@@ -369,9 +370,14 @@ func (e *serverEditor) rebuildList() {
 				if region == e.region && idx == e.index {
 					btn.Importance = widget.HighImportance
 				}
-				block.Add(indent(btn))
+				// Per-row delete, right-pinned like the city/region
+				// trashes — destructive affordances live in the list,
+				// not the form pane.
+				del := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() { e.deleteRow(region, i) })
+				del.Importance = widget.LowImportance
+				block.Add(indentBlock(container.NewBorder(nil, nil, btn, del)))
 			}
-			e.listBox.Add(indent(block))
+			e.listBox.Add(indentBlock(block))
 		}
 	}
 }
@@ -454,29 +460,75 @@ func (e *serverEditor) promptName(title, label string, entry *widget.Entry, onOK
 	d.Show()
 }
 
-// deleteSelected removes the selected row, snapshotting it for the
-// single-level undo. No confirmation: Cancel discards the whole session
-// and Undo restores the last delete.
-func (e *serverEditor) deleteSelected() {
-	if e.index < 0 {
+// deleteRow confirms, then removes the row the list's trash button
+// named. The only undo is Cancel (discards the whole session), so
+// destructive actions always confirm.
+func (e *serverEditor) deleteRow(region string, index int) {
+	if index < 0 || index >= len(e.working[region]) {
 		return
 	}
-	e.undoRegion = e.region
-	e.undoIndex = e.index
-	e.undoRow = e.working[e.region][e.index]
-	e.hasUndo = true
-	e.undoBtn.Enable()
+	victim := e.working[region][index]
+	d := dialog.NewConfirm("Delete server",
+		fmt.Sprintf("Delete %s.%s from %s?\n\nApply saves the deletion; Cancel discards everything.",
+			victim.City, victim.Provider, region),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			rows := e.working[region]
+			e.working[region] = append(rows[:index], rows[index+1:]...)
+			e.reselectAfterRemoval()
+		}, e.u.window)
+	d.Show()
+}
 
-	rows := e.working[e.region]
-	e.working[e.region] = append(rows[:e.index], rows[e.index+1:]...)
-	if len(e.working[e.region]) > 0 {
-		next := e.index
-		if next >= len(e.working[e.region]) {
-			next = len(e.working[e.region]) - 1
-		}
-		e.selectRow(e.region, next)
-		return
-	}
+// deleteCity confirms, then removes every row in the city.
+func (e *serverEditor) deleteCity(region, city string) {
+	d := dialog.NewConfirm("Delete city",
+		fmt.Sprintf("Delete %s and all its servers from %s?", city, region),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			e.working[region] = removeCityRows(e.working[region], city)
+			e.reselectAfterRemoval()
+		}, e.u.window)
+	d.Show()
+}
+
+// deleteRegion confirms, then removes the whole region.
+func (e *serverEditor) deleteRegion(region string) {
+	d := dialog.NewConfirm("Delete region",
+		fmt.Sprintf("Delete %s and all its cities and servers?", region),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			delete(e.working, region)
+			e.reselectAfterRemoval()
+		}, e.u.window)
+	d.Show()
+}
+
+// resetTapped confirms, then reloads the built-ins into the working
+// copy — an in-editor reset, not a prefs change (Apply persists it,
+// Cancel throws it away).
+func (e *serverEditor) resetTapped() {
+	d := dialog.NewConfirm("Reset to defaults",
+		"Reload the built-in server list into the editor?\n\nYour current edits are discarded; Apply saves the defaults as your list.",
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			e.working = rowsFromTable(embeddedServers)
+			e.reselectAfterRemoval()
+		}, e.u.window)
+	d.Show()
+}
+
+// reselectAfterRemoval points the form at the first surviving row (or
+// disables it when nothing is left) and re-renders the list.
+func (e *serverEditor) reselectAfterRemoval() {
 	if region, idx, ok := e.firstRow(); ok {
 		e.selectRow(region, idx)
 		return
@@ -486,23 +538,15 @@ func (e *serverEditor) deleteSelected() {
 	e.rebuildList()
 }
 
-// undoDelete re-inserts the last deleted row at its original index
-// (clamped: rows may have been added since). Single-level: a new delete
-// overwrites the buffer.
-func (e *serverEditor) undoDelete() {
-	if !e.hasUndo {
-		return
+// removeCityRows drops every row belonging to city, preserving order.
+func removeCityRows(rows []editRow, city string) []editRow {
+	out := make([]editRow, 0, len(rows))
+	for _, r := range rows {
+		if r.City != city {
+			out = append(out, r)
+		}
 	}
-	rows := e.working[e.undoRegion]
-	i := e.undoIndex
-	if i > len(rows) {
-		i = len(rows)
-	}
-	rows = append(rows[:i], append([]editRow{e.undoRow}, rows[i:]...)...)
-	e.working[e.undoRegion] = rows
-	e.hasUndo = false
-	e.undoBtn.Disable()
-	e.selectRow(e.undoRegion, i)
+	return out
 }
 
 // apply validates the working copy, persists it as the custom list, and

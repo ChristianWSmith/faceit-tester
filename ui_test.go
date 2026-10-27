@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 )
@@ -142,21 +141,20 @@ func TestNameColumnWidth(t *testing.T) {
 // or every column drifts relative to the body.
 func TestHeaderCellsAlignToColumns(t *testing.T) {
 	test.NewApp()
-	u := &ui{}
-	u.headerRow = container.NewHBox()
+	p := newResultsPane(paneConfig{onLegend: func() {}})
 	nameW := float32(210)
-	u.rebuildHeader(nameW)
+	p.rebuildHeader(nameW)
 	// Six aligned column cells, then a spacer + the "?" legend button.
-	if len(u.headerRow.Objects) != 8 {
-		t.Fatalf("got %d header children, want 8 (6 cells + spacer + legend)", len(u.headerRow.Objects))
+	if len(p.header.Objects) != 8 {
+		t.Fatalf("got %d header children, want 8 (6 cells + spacer + legend)", len(p.header.Objects))
 	}
 	total := nameW + 5*metricColWidth + 5*theme.Padding()
-	u.headerRow.Resize(fyne.NewSize(total, 40))
+	p.header.Resize(fyne.NewSize(total, 40))
 
 	padding := theme.Padding()
 	wantX := float32(0)
 	widths := []float32{nameW, metricColWidth, metricColWidth, metricColWidth, metricColWidth, metricColWidth}
-	for i, child := range u.headerRow.Objects[:6] {
+	for i, child := range p.header.Objects[:6] {
 		if child.Position().X != wantX {
 			t.Errorf("header cell %d x = %v, want %v", i, child.Position().X, wantX)
 		}
@@ -169,8 +167,8 @@ func TestHeaderCellsAlignToColumns(t *testing.T) {
 	// With slack in the row the spacer absorbs it all and the legend
 	// pins to the right edge.
 	wide := total + 150
-	u.headerRow.Resize(fyne.NewSize(wide, 40))
-	legend := u.headerRow.Objects[7]
+	p.header.Resize(fyne.NewSize(wide, 40))
+	legend := p.header.Objects[7]
 	if got, want := legend.Position().X+legend.Size().Width, wide; got < want-1 || got > want+1 {
 		t.Errorf("legend right edge = %v, want ~%v (pinned to row edge)", got, want)
 	}
@@ -191,5 +189,65 @@ func TestIdentifyScrollHeight(t *testing.T) {
 	}
 	if got := identifyScrollHeight(strings.Repeat("x\n", 200), 0); got != 320 {
 		t.Errorf("tall height = %v, want cap 320", got)
+	}
+}
+
+// TestPartyDialogOpens is a construction smoke test: the dialog wires a
+// pane, four slots, the include checkbox and the Rank closure — a nil
+// deref or Fyne misuse (importance-after-render, closure scoping) would
+// panic here. Logic lives in party_test.go/code_test.go.
+func TestPartyDialogOpens(t *testing.T) {
+	test.NewApp()
+	u := &ui{
+		prefs:    newTestPrefs(t),
+		servers:  embeddedServers,
+		regionBy: map[string]string{},
+		state:    map[string]bool{},
+		expanded: map[string]bool{},
+	}
+	for region, srvs := range embeddedServers {
+		for _, s := range srvs {
+			u.regionBy[s.ID()] = region
+			u.state[s.ID()] = true
+		}
+	}
+	u.build()
+	u.window = test.NewWindow(u.content())
+	u.onPartyTap() // must not panic
+	// The results half of the flow: Summarize closes the paste dialog
+	// and opens the full-view summary.
+	u.showPartySummary(newResultsTree(), partyStats{runs: 2, union: 5, ranked: 3, excluded: 2},
+		[]string{"Slot 3: not a valid result code."}, nil)
+	u.onPartyTap() // reopening is safe (fresh pane/slots each time)
+}
+
+// TestDrawerGapGrowsWithProgressBar pins the drawer/progress interlock:
+// the gap under the floating drawer column must cover the window-bottom
+// band, which is the control row plus the progress bar while a run is
+// in flight. A gap sized only for the row made the drawer land on top
+// of the Actions button mid-run.
+func TestDrawerGapGrowsWithProgressBar(t *testing.T) {
+	test.NewApp()
+	u := &ui{
+		prefs:    newTestPrefs(t),
+		servers:  embeddedServers,
+		regionBy: map[string]string{},
+		state:    map[string]bool{},
+		expanded: map[string]bool{},
+	}
+	u.build()
+	_ = u.content() // constructs the drawer layer
+
+	idle := u.drawerGap.MinSize().Height
+	u.setRunning(true)
+	u.sizeDrawerGap()
+	running := u.drawerGap.MinSize().Height
+	if running <= idle {
+		t.Errorf("gap while running = %v, want > idle %v (progress bar accounted for)", running, idle)
+	}
+	u.setRunning(false)
+	u.sizeDrawerGap()
+	if got := u.drawerGap.MinSize().Height; got != idle {
+		t.Errorf("gap after run = %v, want back to idle %v", got, idle)
 	}
 }

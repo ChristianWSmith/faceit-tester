@@ -28,7 +28,8 @@ best-first, then back to test order; provider rows always keep test order.
 Tap a server row to copy it to the clipboard, tap an errored row to see
 the full error, and the **?** button above the table explains the colors.
 **Copy Summary** in the actions drawer copies the whole run as a text
-table, ready to paste into a thread.
+table, ready to paste into a thread; the **Party** dialog's **Copy
+Code** copies it as one shareable result code instead.
 
 While a run is in flight, a progress bar with a remaining-time estimate
 tracks it, the status line reports live send/loss counts for the current
@@ -66,6 +67,41 @@ Identification is high-confidence but not infallible: DDoS-fronted or
 relayed connections report the scrubber, not the datacenter. The raw RDAP
 evidence (registrant, netname, country) is always shown next to the guess.
 
+## Party summary
+
+A party of up to five players can pool their runs and find out which
+servers to queue for together:
+
+1. After a run, **Copy Code** (in the **Party** dialog) copies the whole
+   run as a single *result code* — a compact encoded string that's safe
+   to paste into Discord (a full run is a few hundred characters). It
+   carries every measured metric per server (p1/median/p99 ping,
+   jitter, loss, scrubbed/error flags) keyed by **host** — the ping
+   target — so teammates' custom server lists don't have to agree with
+   yours.
+2. Any player opens **Party** (in the drawer), pastes the codes into
+   the five teammate slots (a spare, just in case), and presses
+   **Summarize**. Your own run is included automatically (the checkbox,
+   on by default). The slots remember what you pasted for the rest of
+   the session — close and reopen the dialog and it's still there;
+   **Clear** wipes them (nothing is saved to disk).
+3. The paste dialog closes and a full-size **Party summary** dialog
+   opens with the same region → city → provider results tree you
+   already know, where every metric is the **column-wise worst
+   across all runs** — nobody queues for a server that's fine for three
+   players and awful for the fourth. Names come from *your* server list
+   (custom overrides included); teammates' targets your list doesn't
+   know appear under **Unknown**, named by the target. Tap a column
+   header to sort each region's cities (worst-first, then best-first),
+   tap a row to see each player's raw numbers for that server, and read
+   the status line at the top: only servers present in *every* run
+   are summarized, and the count of excluded ones is called out.
+
+Result codes are self-describing and deliberately versionless — they
+either parse or they don't. Everyone in the party should simply run the
+same (latest) app; a code from an incompatible build shows up as "not a
+valid result code" and just needs re-sharing.
+
 ## Regions and cities
 
 Server lists are trimmed to FACEIT's currently offered locations (city
@@ -94,12 +130,16 @@ divider position.
 ## Custom server lists
 
 **Edit Servers** (in the actions drawer — the **Actions** button next to
-Test, alongside Export CSV, Copy Summary, Identify, and About) opens the
+Test, alongside Export CSV, Copy Summary, Party, Identify,
+and About) opens the
 built-in list for customization. Pick a server on the left; edit its
 city, provider, host, and probe overrides on the right — the form hints
-explain each field. **+ Add region** and **+ City** create whole new
-regions and cities; **+** next to a city adds a server to it; **Delete
-Server** removes the selected one and **Undo delete** brings it back.
+explain each field. **+ Add region**, **+ City**, and **+ Provider**
+create whole new regions, cities, and servers; trash buttons in the
+list delete a region, a city, or an individual server (each asks
+first).
+**Reset to Defaults** reloads the built-in list into the editor — press
+Apply to save it (or Cancel to throw the reset away).
 
 Nothing changes until you press **Apply**, which stores the entire list
 as your custom server list — the first edit starts from the built-ins,

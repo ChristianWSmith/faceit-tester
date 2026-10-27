@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"fyne.io/fyne/v2/test"
 )
 
 func TestEditRowRoundTrip(t *testing.T) {
@@ -95,4 +97,39 @@ func TestNonNegativeInt(t *testing.T) {
 	if err := nonNegativeInt("-1"); err == nil {
 		t.Fatal("want error for negative")
 	}
+}
+
+func TestRemoveCityRows(t *testing.T) {
+	rows := []editRow{{City: "A", Provider: "P1"}, {City: "B", Provider: "P2"}, {City: "A", Provider: "P3"}}
+	out := removeCityRows(rows, "A")
+	if len(out) != 1 || out[0].City != "B" || out[0].Provider != "P2" {
+		t.Fatalf("removeCityRows(A) = %+v, want just the B row", out)
+	}
+	if got := removeCityRows(rows, "Missing"); len(got) != 3 {
+		t.Fatalf("unknown city kept %d rows, want 3", len(got))
+	}
+}
+
+// TestEditorDialogOpens is a construction smoke test: the rebuilt list
+// (stretched city blocks, + Provider, delete-city/region buttons,
+// Reset to Defaults, no Undo) must wire without a nil deref or Fyne
+// misuse. Editing logic lives in the pure-function tests above.
+func TestEditorDialogOpens(t *testing.T) {
+	test.NewApp()
+	u := &ui{
+		prefs:    newTestPrefs(t),
+		servers:  embeddedServers,
+		regionBy: map[string]string{},
+		state:    map[string]bool{},
+		expanded: map[string]bool{},
+	}
+	for region, srvs := range embeddedServers {
+		for _, s := range srvs {
+			u.regionBy[s.ID()] = region
+			u.state[s.ID()] = true
+		}
+	}
+	u.build()
+	u.window = test.NewWindow(u.content())
+	u.onEditTap() // must not panic
 }
